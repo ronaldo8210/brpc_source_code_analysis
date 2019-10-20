@@ -5,7 +5,7 @@
   * [server](server.md)
 * bthread 
   * 调度算法
-  * 同一RPC过程中不同bthread间的同步(bthread_sync.md)
+  * [同一RPC过程中各个bthread间的同步](bthread_sync.md)
     * [线程futex同步](futex.md)
 * 容灾容错
   * 请求重试
