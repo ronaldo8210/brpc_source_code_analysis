@@ -3,12 +3,10 @@
 * [线程模型](thread_model.md)
   * [client](client.md)
   * [server](server.md)
-* M:N协程
+* bthread 
   * 调度算法
-  * 同步方式
+  * 同一RPC过程中不同bthread间的同步(bthread_sync.md)
     * [线程futex同步](futex.md)
-    * 协程锁
-    * 协程条件变量
 * 容灾容错
   * 请求重试
   * 服务限流
