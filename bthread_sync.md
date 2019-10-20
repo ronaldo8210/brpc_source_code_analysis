@@ -5,4 +5,7 @@
 brpc中
 
 一次RPC过程中，Id、Controller、Butex的内存布局如下图所示：
-![img](../images/bthread_sync_1.png)
+
+![img](images/bthread_sync_1.png)
+
+当有一次
