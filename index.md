@@ -3,12 +3,16 @@
 * [线程模型](thread_model.md)
   * [client](client.md)
   * [server](server.md)
+* [Client端执行流程]
+  * 无异常状态下的一次完整RPC请求过程
+  * 重试策略
+  * Backup Request
+  * [同一RPC过程中各个bthread间的同步](bthread_sync.md)
+* [Server端执行流程]
 * bthread 
   * 调度算法
-  * [同一RPC过程中各个bthread间的同步](bthread_sync.md)
-    * [线程futex同步](futex.md)
+  * [线程futex同步](futex.md)
 * 容灾容错
-  * 请求重试
   * 服务限流
   * 防雪崩
 * 性能监控
