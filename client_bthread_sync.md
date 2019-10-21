@@ -12,11 +12,19 @@ brpc中
 
 ![img](images/client_bthread_sync_1.png)
 
-主要字段说明：
+Id结构主要字段意义：
+first_ver：如果Butex结构的value值为first_ver，则表示当前没有bthread在访问Controller结构
+locked_ver：如果Butex结构的value值被设为locked_ver，则表示当前已有一个bthread在操作Controller
+mutex：类似futex的线程锁，由于试图操作同一Controller的若干bthread可能在不同的系统线程pthread上被执行，所以同时访问Controller时需要先做pthread间的互斥
+data：指向Controller的指针
 
 
 主要代码在src/bthread/id.cpp中，解释下几个主要的函数的作用：
 
+### 执行时序示例
+
+假设有三个bthread A、B、C（位于三个不同TaskGroup的可执行任务队列中，三个TaskGroup分别是三个pthread的线程私有对象）同时访问Controller，一个可能的执行时序如下：
+T1时刻：A、B、C三个bthread同时执行到
 
 ### 具体实例
 
