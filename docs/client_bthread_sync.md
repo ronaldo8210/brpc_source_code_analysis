@@ -10,7 +10,7 @@ brpc中
 
 一次RPC过程中，Id、Controller、Butex的内存布局如下图所示：
 
-![img](images/client_bthread_sync_1.png)
+![img](../images/client_bthread_sync_1.png)
 
 Id结构主要字段意义：
 first_ver：如果Butex结构的value值为first_ver，则表示当前没有bthread在访问Controller结构
