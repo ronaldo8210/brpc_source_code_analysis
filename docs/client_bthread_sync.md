@@ -89,6 +89,7 @@ int bthread_id_lock_and_reset_range_verbose(
                 errno != EWOULDBLOCK && errno != EINTR) {
                 return errno;
             }
+            // 重新去竞争线程锁，也不一定能竞争成功，所以上层要有一个while循环不断的去判断被唤醒的bthread抢到线程锁后可能检测到的value的各种不同值
             meta->mutex.lock();
         } else { // bthread_id_about_to_destroy was called.
             meta->mutex.unlock();
