@@ -127,13 +127,17 @@ int bthread_id_unlock(bthread_id_t id) {
     // Release fence makes sure all changes made before signal visible to
     // woken-up waiters.
     const uint32_t id_ver = bthread::get_version(id);
+    // 竞争线程锁
     meta->mutex.lock();
     if (!meta->has_version(id_ver)) {
+        // call_id非法，严重错误
         meta->mutex.unlock();
         LOG(FATAL) << "Invalid bthread_id=" << id.value;
         return EINVAL;
     }
     if (*butex == meta->first_ver) {
+        // 一个bthread执行到这里，观察到的Butex的value的值要么是locked_ver，要么是contented_ver，
+        // 不可能是first_ver，否则严重错误
         meta->mutex.unlock();
         LOG(FATAL) << "bthread_id=" << id.value << " is not locked!";
         return EPERM;
@@ -142,6 +146,7 @@ int bthread_id_unlock(bthread_id_t id) {
     if (meta->pending_q.pop(&front)) {
         meta->lock_location = front.location;
         meta->mutex.unlock();
+        // 
         if (meta->on_error) {
             return meta->on_error(front.id, meta->data, front.error_code);
         } else {
@@ -149,11 +154,15 @@ int bthread_id_unlock(bthread_id_t id) {
                                    front.error_text);
         }
     } else {
+        // 如果contended为true，则有N（N>=1）个bthread挂在Butex的waiters队列中，等待唤醒
         const bool contended = (*butex == meta->contended_ver());
+        // Butex的value恢复到first_ver，表示当前的bthread对Controller的独占性访问已完成，后续被唤醒的bthread可以去独占性的访问Controller了
         *butex = meta->first_ver;
+        // 关键字段已完成更新，释放线程锁
         meta->mutex.unlock();
         if (contended) {
             // We may wake up already-reused id, but that's OK.
+            // 如果有bthread挂在waiters队列中，唤醒其中之一
             bthread::butex_wake(butex);
         }
         return 0; 
