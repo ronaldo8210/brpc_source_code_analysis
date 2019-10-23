@@ -26,8 +26,11 @@ Butex结构中主要是存储了一个双向链表waiters，链表的每个元�
 ## 源码解释
 主要代码在src/bthread/id.cpp中，解释下几个主要的函数的作用：
 
+
+bthread_id_lock_and_reset_range_verbose：竞争butex锁、等待butex锁
+
 ```c++
-// bthread访问Controller对象前必须要执行bthread_id_lock，实际上是调用bthread_id_lock_and_reset_range_verbose
+// bthread访问Controller对象前必须要执行bthread_id_lock，实际上是调用bthread_id_lock_and_reset_range_verbose。
 // 在这个函数中会bthread会根据Id的mutex指针指向的Butex结构中value的当前值，来判断下一步的动作：
 // 1、如果value=first_ver，当前没有bthread在操作Controller，则把Butex的value置为locked_ver，
       告诉后来的bthread“我正在操作Controller，其他bthread先等待”，再去操作Controller；
@@ -38,16 +41,16 @@ int bthread_id_lock_and_reset_range_verbose(
     if (!meta) {
         return EINVAL;
     }
-    // id_ver是call_id（一次RPC由于重试等因素可能产生多次call，每个call有其唯一id）
+    // id_ver是call_id（一次RPC由于重试等因素可能产生多次call，每个call有其唯一id）。
     const uint32_t id_ver = bthread::get_version(id);
-    // butex指针指向的是Butex结构的第一个元素：整型变量value
+    // butex指针指向的是Butex结构的第一个元素：整型变量value。
     uint32_t* butex = meta->butex;
     bool ever_contended = false;
-    // 这段代码可以被位于不同pthread上的多个bthread同时执行，所以需要先加线程锁
+    // 这段代码可以被位于不同pthread上的多个bthread同时执行，所以需要先加线程锁。
     meta->mutex.lock();
     while (meta->has_version(id_ver)) {
         if (*butex == meta->first_ver) {
-            // 执行到这里，表示当前没有其他bthread在访问Controller
+            // 执行到这里，表示当前没有其他bthread在访问Controller。
             // contended locker always wakes up the butex at unlock.
             meta->lock_location = location;
             if (range == 0) {
@@ -61,13 +64,13 @@ int bthread_id_lock_and_reset_range_verbose(
                     << "max range is " << bthread::ID_MAX_RANGE
                     << ", actually " << range;
             } else {
-                // range是一次RPC的重试次数，如果first_ver=1，一次RPC在超时时间内允许重试3次，则locked_ver=4
+                // range是一次RPC的重试次数，如果first_ver=1，一次RPC在超时时间内允许重试3次，则locked_ver=4。
                 meta->locked_ver = meta->first_ver + range;
             }
-            // 1、如果是第一个访问Controller的bthread，则把butex指向的Butex结构的value的值置为locked_ver
-            // 2、如果是曾经被挂起的bthread，则把value的值置为contended_ver
+            // 1、如果是第一个访问Controller的bthread，则把butex指向的Butex结构的value的值置为locked_ver；
+            // 2、如果是曾经被挂起的bthread，则把value的值置为contended_ver。
             *butex = (ever_contended ? meta->contended_ver() : meta->locked_ver);
-            // Butex的value已经被重置，后来的bthread看到value后就会得知已经有一个bthread在访问Controller，可以释放线程锁了
+            // Butex的value已经被重置，后来的bthread看到value后就会得知已经有一个bthread在访问Controller，可以释放线程锁了。
             meta->mutex.unlock();
             if (pdata) {
                 // 找到Controller的指针并返回
@@ -75,23 +78,33 @@ int bthread_id_lock_and_reset_range_verbose(
             }
             return 0;
         } else if (*butex != meta->unlockable_ver()) {
-            // 执行到这里，表示之前已经有bthread正在访问Controller且还没有访问完成，执行这段代码的bthread必须要挂起
-            // 挂起是指：bthread将当前各寄存器的值存入context结构，让出cpu，执行这个bthread的pthread从TaskGroup的任务队列中取出下一个bthread去执行
+            // 1、一个bthread（假设bthread id为C）执行到这里，Butex的value值要么是locked_ver，要么是contented_ver：
+            //    a、如果value=locked_ver，表示当前有一个bthread A正在访问Controller且还没有访问完成，没有其他bthread被挂起；
+            //    b、如果value=contented_ver，表示当前不仅有一个bthread A正在访问Controller且还没有访问完成，而且还有一个或多个
+                     bthread（B、D、E...）被挂起，等待A唤醒。
+            // 2、执行到这段代码的bthread必须要挂起，挂起前先将Butex的value置为contended_ver，告诉正在访问Controller的bthread，
+                  访问完Controller后，要负责唤起挂起的bthread；
+            // 3、挂起是指：bthread将当前各寄存器的值存入context结构，让出cpu，执行这个bthread的pthread从TaskGroup的任务队列中
+                  取出下一个bthread去执行。
             *butex = meta->contended_ver();
-            // 挂起的bthread必须由之前将Butex的value设为expected_ver的bthread唤醒，expected_ver的作用就是防止ABA问题
+            // 挂起的bthread必须由之前将Butex的value设为expected_ver的bthread唤醒，expected_ver的作用就是防止ABA问题。
             uint32_t expected_ver = *butex;
-            // 关键字段的重置已完成，可以释放线程锁了
+            // 关键字段的重置已完成，可以释放线程锁了。
             meta->mutex.unlock();
-            // 已经出现了bthread间的竞态
+            // 已经出现了bthread间的竞态。
             ever_contended = true;
-            // 
+            // 新建ButexWaiter结构保存该bthread的主要信息并将ButexWaiter加入waiters链表，然后yield让出cpu，
+            // bthread被重新执行后，从butex_wait函数返回处开始执行。
             if (bthread::butex_wait(butex, expected_ver, NULL) < 0 &&
                 errno != EWOULDBLOCK && errno != EINTR) {
                 return errno;
             }
-            // 重新去竞争线程锁，也不一定能竞争成功，所以上层要有一个while循环不断的去判断被唤醒的bthread抢到线程锁后可能检测到的value的各种不同值
+            // 之前挂起的bthread被重新执行，重新去竞争线程锁，
+            // 不一定能竞争成功，所以上层要有一个while循环不断的去判断被唤醒的bthread抢到线程锁后可能检测到的value的各种不同值。
             meta->mutex.lock();
         } else { // bthread_id_about_to_destroy was called.
+            // Butex的value被其他bthread置为unlockable_ver，Id结构将被释放回资源池，Controller结构将被析构，即一次RPC已经完成，
+            // 因此执行到这里的bthread直接返回，不会再有后续的动作
             meta->mutex.unlock();
             return EPERM;
         }
@@ -100,6 +113,9 @@ int bthread_id_lock_and_reset_range_verbose(
     return EINVAL;
 }
 ```
+
+
+bthread_id_unlock：释放butex锁，唤醒一个等待锁的bthread
 
 ```c++
 int bthread_id_unlock(bthread_id_t id) {
@@ -145,6 +161,8 @@ int bthread_id_unlock(bthread_id_t id) {
 }
 ```
 
+
+bthread_id_join：
 ```c++
 int bthread_id_join(bthread_id_t id) {
     const bthread::IdResourceId slot = bthread::get_slot(id);
@@ -171,6 +189,39 @@ int bthread_id_join(bthread_id_t id) {
     return 0;
 }
 ```
+
+
+
+```c++
+int bthread_id_about_to_destroy(bthread_id_t id) {
+    bthread::Id* const meta = address_resource(bthread::get_slot(id));
+    if (!meta) {
+        return EINVAL;
+    }
+    const uint32_t id_ver = bthread::get_version(id);
+    uint32_t* butex = meta->butex;
+    meta->mutex.lock();
+    if (!meta->has_version(id_ver)) {
+        meta->mutex.unlock();
+        return EINVAL;
+    }
+    if (*butex == meta->first_ver) {
+        meta->mutex.unlock();
+        LOG(FATAL) << "bthread_id=" << id.value << " is not locked!";
+        return EPERM;
+    }
+    const bool contended = (*butex == meta->contended_ver());
+    *butex = meta->unlockable_ver();
+    meta->mutex.unlock();
+    if (contended) {
+        // wake up all waiting lockers.
+        bthread::butex_wake_except(butex, 0);
+    }
+    return 0;
+}
+```
+
+
 
 ```c++
 int bthread_id_unlock_and_destroy(bthread_id_t id) {
