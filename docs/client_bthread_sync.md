@@ -190,6 +190,8 @@ int bthread_id_join(bthread_id_t id) {
         if (!has_ver) {
             break;
         }
+        // 挂在join_butex指向的Butex结构的waiter队列中，并yield让出cpu；
+        // 恢复执行的时候，RPC过程已经完成，
         if (bthread::butex_wait(join_butex, expected_ver, NULL) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
@@ -200,7 +202,7 @@ int bthread_id_join(bthread_id_t id) {
 ```
 
 
-
+bthread_id_about_to_destroy：
 ```c++
 int bthread_id_about_to_destroy(bthread_id_t id) {
     bthread::Id* const meta = address_resource(bthread::get_slot(id));
@@ -274,5 +276,9 @@ T1时刻：A、B、C三个bthread同时执行到
 
 T2时刻：
 
-## 具体实例
+## 一次RPC过程中发生bthread竞争时内存布局的变化
+通过一个实例，结合内存布局来讲述竞态发生时，程序的执行过程。
+假设现有一次RPC请求，开启了Backup Request机制，第一次请求发出后，还没到backup request timeout超时时间的时候，内存布局如下：
+
+
 
