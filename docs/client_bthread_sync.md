@@ -276,9 +276,10 @@ T1时刻：A、B、C三个bthread同时执行到
 
 T2时刻：
 
-## 一次RPC过程中发生bthread竞争时内存布局的变化
-通过一个实例，结合内存布局来讲述竞态发生时，程序的执行过程。
-假设现有一次RPC请求，开启了Backup Request机制，第一次请求发出后，还没到backup request timeout超时时间的时候，内存布局如下：
+## 一次RPC过程中发生bthread竞争时内存布局的变化过程
+以brpc自带的实例程序example/backup_request_c++/client.cpp为例，通过计算机中内存布局的变化，来讲述竞态发生时，程序的执行过程。
 
+* 第一次请求发出后，还没到backup request timeout超时时间的时候，内存布局如下：
 
+<img src="../images/client_bthread_sync_2.png" width="100%" height="100%"/>
 
