@@ -8,12 +8,12 @@
   * Backup Request
   * [同一RPC过程中各个bthread间的同步](docs/client_bthread_sync.md)
 * Server端执行流程
+  * 处理一次请求的完整过程
+  * 服务限流
+  * 防雪崩
 * bthread 
   * 调度算法
   * [线程futex同步](docs/futex.md)
-* 容灾容错
-  * 服务限流
-  * 防雪崩
 * 性能监控
 * 基础库
   * 对象池
