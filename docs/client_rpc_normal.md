@@ -6,5 +6,12 @@ Channel
 
 这个程序的具体运行过程为：
 1. 在main函数的栈上创建Channel，并创建N个bthread（后续设N=3），每个bthread的task函数指向static类型函数sender；
-2. 惰性初始化TaskControl单例对象与多个TaskGroup对象，每个TaskGroup对应一个系统线程pthread，是pthread的线程私有对象，pthread启动后，阻塞在TaskGroup的代码处，等待任务；
+2. 惰性初始化下列全局对象：
+
+   a. 一个TaskControl单例对象；
+   
+   b. 多个TaskGroup对象，每个TaskGroup对应一个系统线程pthread，是pthread的线程私有对象，每个pthread启动后执行TaskGroup的run_main_task函数，该函数是个无限循环，不停地获取bthread、执行bthread任务；
+   
+   c. 一个定时器对象。
+   
 3. 
