@@ -13,6 +13,7 @@
   * 防雪崩
 * bthread 
   * 调度算法
+  * [同步策略](docs/bthread_sync_strategy.md)
   * [线程futex同步](docs/futex.md)
 * 性能监控
 * 基础库
