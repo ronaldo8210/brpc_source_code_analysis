@@ -2,6 +2,10 @@
 * [线程模型](docs/thread_model.md)
   * [client](docs/client.md)
   * [server](docs/server.md)
+* 网络I/O
+  * protobuf编程模式
+  * 多线程向同一TCP连接写入数据
+  * 从TCP连接读取数据
 * Client端执行流程
   * [无异常状态下的一次完整RPC请求过程](docs/client_rpc_normal.md)
   * 重试策略
