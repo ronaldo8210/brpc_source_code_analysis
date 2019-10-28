@@ -8,6 +8,8 @@ Controller
 # 内存布局与多线程执行状态
 以brpc自带的实例程序example/multi_threaded_echo_c++/client.cpp为例，结合Client端内存布局的变化过程，讲述无异常状态下的Client发送请求直到处理响应的过程。
 
+该程序运行后，与单台服务器建立一条TCP长连接，创建N个bthread在此TCP连接上发送、接收数据，不涉及连接池、负载均衡。
+
 这个程序的具体运行过程为：
 1. 在main函数的栈上创建Channel；
 2. 在heap内存上惰性初始化下列全局对象：
@@ -33,7 +35,7 @@ Controller
 
 7. 在CallMethod函数执行过程中，主要工作是完成对Controller对象成员变量的赋值，包括RPC起始时间戳、重试次数、RPC超时时间、Backup Request超时时间、标识一次RPC过程的唯一id correlation_id等等。Controller对象可以认为是存储了一次RPC过程的参数和状态。同时会构造Controller对象相关联的Id结构，该结构的作用是同步一次RPC过程中各个bthread，因为一次RPC过程，发送请求、接收请求、超时处理均是由不同的bthread负责，各个bthread可能运行在不同的pthread上，因此Controller对象可能被不同的pthread并发访问，Id结构的作用就是保护Controller对象同一时刻只能由一个bthread访问，如果运行在其他pthread上的bthread试图同时访问就会造成竞态，则后来的bthread只能挂起在Id的mutex队列中并yield让出cpu，等待当前访问Controller的bthread唤醒。具体运行过程参考[同一RPC过程中各个bthread间的同步](client_bthread_sync.md)这一节
 
-8. 在CallMethod中设置Controller对象主要成员变量、构造了Id结构之后，线程执行流程转入Controller的IssueRPC函数，
+8. 在CallMethod中设置Controller对象主要成员变量、构造了Id结构之后，线程执行流程转入Controller的IssueRPC函数，在该函数中按照指定协议格式将第一次请求的call_id、RPC方法名、实际待发送数据打包成报文，调用Socket的Write方法将报文通过TCP长连接发给服务器。Socket的Write函数具体运作过程参考[多线程向同一TCP连接写数据](io_write.md)。调用Write函数后，负责数据发送的bthread就完成了发送工作，需要调用bthread_id_unlock释放对Controller对象的独占访问。如果是bthread间synchronous方式，则负责数据发送的bthread调用bthread_id_join挂起，让出cpu，等待负责处理response的bthread来唤醒。
 
-
+程序运行到此的状态是，
 
