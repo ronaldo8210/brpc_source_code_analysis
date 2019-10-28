@@ -1,5 +1,9 @@
-# 概念
+# 主要数据结构
 Channel
+
+Controller
+
+
 
 # 内存布局与多线程执行状态
 以brpc自带的实例程序example/multi_threaded_echo_c++/client.cpp为例，结合Client端内存布局的变化过程，讲述无异常状态下的Client发送请求直到处理响应的过程。
@@ -23,6 +27,13 @@ Channel
 <img src="../images/client_send_req_1.png" width="70%" height="70%"/>
 
 
-5. 各个TaskGroup所在的pthread从_remote_rq中拿到bthread id，进而从对象池中找到TaskMeta，开始执行TaskMeta的任务函数，即client.cpp中的static类型的sender函数。由于各个bthread有各自的私有栈空间，所以sender中的局部变量被分配在bthread的私有栈内存上。
+5. 各个TaskGroup所在的pthread从_remote_rq中拿到bthread id，进而从对象池中找到TaskMeta，开始执行TaskMeta的任务函数，即client.cpp中的static类型的sender函数。由于各个bthread有各自的私有栈空间，所以sender中的局部变量request、response、Controller对象均被分配在bthread的私有栈内存上。
 
-6. 下面开始解释sender的执行过程，
+6. 根据protobuf的标准编程模式，3个执行sender函数的pthread都会执行Channel的CallMethod函数，CallMethod函数的入参为各个TaskMeta任务私有的request、response、RpcController，内部执行过程是根据一些参数来填充RpcController实例的各个成员变量，没有pthread间的竞态，因此CallMethod本身是线程安全的。而Channel对象是main函数的栈上对象，main函数所在线程已被挂起，直到3个bthread全部执行完成后才会结束，所以Channel对象生命期是安全的。
+
+7. 在CallMethod函数执行过程中，主要工作是完成对Controller对象成员变量的赋值，包括RPC起始时间戳、重试次数、RPC超时时间、Backup Request超时时间、标识一次RPC过程的唯一id correlation_id等等。Controller对象可以认为是存储了一次RPC过程的参数和状态。同时会构造Controller对象相关联的Id结构，该结构的作用是同步一次RPC过程中各个bthread，因为一次RPC过程，发送请求、接收请求、超时处理均是由不同的bthread负责，各个bthread可能运行在不同的pthread上，因此Controller对象可能被不同的pthread并发访问，Id结构的作用就是保护Controller对象同一时刻只能由一个bthread访问，如果运行在其他pthread上的bthread试图同时访问就会造成竞态，则后来的bthread只能挂起在Id的mutex队列中并yield让出cpu，等待当前访问Controller的bthread唤醒。具体运行过程参考[同一RPC过程中各个bthread间的同步](client_bthread_sync.md)这一节
+
+8. 在CallMethod中设置Controller对象主要成员变量、构造了Id结构之后，线程执行流程转入Controller的IssueRPC函数，
+
+
+
