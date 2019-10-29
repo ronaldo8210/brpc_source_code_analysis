@@ -1,8 +1,16 @@
 ## 概述
-
+考虑brpc自带的示例程序example/multi_threaded_echo_c++/client.cpp，use_bthread为true的情况下，多个bthread通过一条TCP长连接向服务端发送数据，而多个bthread又是运行在多个系统线程pthread上的，所以多个pthread如何高效且线程安全地向一个TCP连接写数据，通常是系统设计需要重点考虑的。
 
 ## 具体实现
 brpc中的Socket类对象代表Client端与Server端的一条TCP连接，
+
+Socket类对象中比较重要的成员变量：
+
+_epollout_butex：
+
+_write_head：
+
+结合代码阐述下Socket类的几个主要函数的作用：
 
 StartWrite函数：向TCP连接写数据的入口函数，在实际环境下通常会被多个pthread执行，必须要做到线程安全
 
@@ -96,6 +104,88 @@ FAIL_TO_WRITE:
     ReleaseAllFailedWriteRequests(req);
     errno = saved_errno;
     return -1;
+}
+```
+
+KeepWrite
+```c++
+void* Socket::KeepWrite(void* void_arg) {
+    g_vars->nkeepwrite << 1;
+    WriteRequest* req = static_cast<WriteRequest*>(void_arg);
+    SocketUniquePtr s(req->socket);
+
+    // When error occurs, spin until there's no more requests instead of
+    // returning directly otherwise _write_head is permantly non-NULL which
+    // makes later Write() abnormal.
+    WriteRequest* cur_tail = NULL;
+    do {
+        // req was written, skip it.
+        if (req->next != NULL && req->data.empty()) {
+            WriteRequest* const saved_req = req;
+            req = req->next;
+            s->ReturnSuccessfulWriteRequest(saved_req);
+        }
+        const ssize_t nw = s->DoWrite(req);
+        if (nw < 0) {
+            if (errno != EAGAIN && errno != EOVERCROWDED) {
+                const int saved_errno = errno;
+                PLOG(WARNING) << "Fail to keep-write into " << *s;
+                s->SetFailed(saved_errno, "Fail to keep-write into %s: %s",
+                             s->description().c_str(), berror(saved_errno));
+                break;
+            }
+        } else {
+            s->AddOutputBytes(nw);
+        }
+        // Release WriteRequest until non-empty data or last request.
+        while (req->next != NULL && req->data.empty()) {
+            WriteRequest* const saved_req = req;
+            req = req->next;
+            s->ReturnSuccessfulWriteRequest(saved_req);
+        }
+        // TODO(gejun): wait for epollout when we actually have written
+        // all the data. This weird heuristic reduces 30us delay...
+        // Update(12/22/2015): seem not working. better switch to correct code.
+        // Update(1/8/2016, r31823): Still working.
+        // Update(8/15/2017): Not working, performance downgraded.
+        //if (nw <= 0 || req->data.empty()/*note*/) {
+        if (nw <= 0) {
+            // 如果是由于fd的inode输出缓冲区已满导致write操作返回值小于等于0，则需要挂起执行KeepWrite的bthread，让出cpu，
+            // 让该bthread所在的pthread去任务队列中取出下一个bthread去执行。等到epoll返回告知inode输出缓冲区有可写空间时，
+            // 再唤起执行KeepWrite的bthread，继续向fd写入数据
+            g_vars->nwaitepollout << 1;
+            bool pollin = (s->_on_edge_triggered_events != NULL);
+            // NOTE: Waiting epollout within timeout is a must to force
+            // KeepWrite to check and setup pending WriteRequests periodically,
+            // which may turn on _overcrowded to stop pending requests from
+            // growing infinitely.
+            const timespec duetime =
+                butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
+            const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
+            if (rc < 0 && errno != ETIMEDOUT) {
+                const int saved_errno = errno;
+                PLOG(WARNING) << "Fail to wait epollout of " << *s;
+                s->SetFailed(saved_errno, "Fail to wait epollout of %s: %s",
+                             s->description().c_str(), berror(saved_errno));
+                break;
+            }
+        }
+        if (NULL == cur_tail) {
+            for (cur_tail = req; cur_tail->next != NULL;
+                 cur_tail = cur_tail->next);
+        }
+        // Return when there's no more WriteRequests and req is completely
+        // written.
+        if (s->IsWriteComplete(cur_tail, (req == cur_tail), &cur_tail)) {
+            CHECK_EQ(cur_tail, req);
+            s->ReturnSuccessfulWriteRequest(req);
+            return NULL;
+        }
+    } while (1);
+
+    // Error occurred, release all requests until no new requests.
+    s->ReleaseAllFailedWriteRequests(req);
+    return NULL;
 }
 ```
 
