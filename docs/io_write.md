@@ -1,6 +1,8 @@
 ## 概述
 考虑brpc自带的示例程序example/multi_threaded_echo_c++/client.cpp，use_bthread为true的情况下，多个bthread通过一条TCP长连接向服务端发送数据，而多个bthread又是运行在多个系统线程pthread上的，所以多个pthread如何高效且线程安全地向一个TCP连接写数据，通常是系统设计需要重点考虑的。
 
+## 设计思想
+
 ## 具体实现
 brpc中的Socket类对象代表Client端与Server端的一条TCP连接，
 
@@ -17,7 +19,7 @@ StartWrite函数：向TCP连接写数据的入口函数，在实际环境下通�
 ```c++
 int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     // Release fence makes sure the thread getting request sees *req
-    // 与当前
+    // 与当前_write_head做原子交换，如果是第一个写fd的线程，则exchange返回NULL，并获得
     WriteRequest* const prev_head =
         _write_head.exchange(req, butil::memory_order_release);
     if (prev_head != NULL) {
@@ -188,4 +190,65 @@ void* Socket::KeepWrite(void* void_arg) {
     return NULL;
 }
 ```
+
+
+```c++
+bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
+                             bool singular_node,
+                             Socket::WriteRequest** new_tail) {
+    CHECK(NULL == old_head->next);
+    // Try to set _write_head to NULL to mark that the write is done.
+    WriteRequest* new_head = old_head;
+    WriteRequest* desired = NULL;
+    bool return_when_no_more = true;
+    if (!old_head->data.empty() || !singular_node) {
+        desired = old_head;
+        // Write is obviously not complete if old_head is not fully written.
+        return_when_no_more = false;
+    }
+    if (_write_head.compare_exchange_strong(
+            new_head, desired, butil::memory_order_acquire)) {
+        // No one added new requests.
+        if (new_tail) {
+            *new_tail = old_head;
+        }
+        return return_when_no_more;
+    }
+    CHECK_NE(new_head, old_head);
+    // Above acquire fence pairs release fence of exchange in Write() to make
+    // sure that we see all fields of requests set.
+
+    // Someone added new requests.
+    // Reverse the list until old_head.
+    WriteRequest* tail = NULL;
+    WriteRequest* p = new_head;
+    do {
+        while (p->next == WriteRequest::UNCONNECTED) {
+            // TODO(gejun): elaborate this
+            sched_yield();
+        }
+        WriteRequest* const saved_next = p->next;
+        p->next = tail;
+        tail = p;
+        p = saved_next;
+        CHECK(p != NULL);
+    } while (p != old_head);
+
+    // Link old list with new list.
+    old_head->next = tail;
+    // Call Setup() from oldest to newest, notice that the calling sequence
+    // matters for protocols using pipelined_count, this is why we don't
+    // calling Setup in above loop which is from newest to oldest.
+    for (WriteRequest* q = tail; q; q = q->next) {
+        q->Setup(this);
+    }
+    if (new_tail) {
+        *new_tail = new_head;
+    }
+    return false;
+}
+```
+
+
+##示例
 
