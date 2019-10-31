@@ -241,6 +241,8 @@ IsWriteComplete函数：
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
                              bool singular_node,
                              Socket::WriteRequest** new_tail) {
+    // old_head只有两种可能：1、指向持有写权限的bthread携带的WriteRequest，2、
+    // 不论是哪两种，old_head指向的WriteRequest的next必然是NULL
     CHECK(NULL == old_head->next);
     // Try to set _write_head to NULL to mark that the write is done.
     WriteRequest* new_head = old_head;
@@ -300,9 +302,11 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 
 1. 假设T0时刻有3个分别被不同pthread执行的bthread同时向同一个fd写入数据，3个bthread同时进入到StartWrite函数执行_write_head.exchange原子操作，_write_head初始值是NULL，假设bthread 0第一个用自己的req指针与_write_head做exchange，则bthread 0获取了向fd写数据的权限，bthread 1和bthread 2将待发送的数据加入_write_head链表后直接return 0返回（bthread 1和bthread 2返回后会被挂起，yield让出cpu）。此时内存结构为：
 
-<img src="../images/io_write_linklist_1.png" width="100%" height="100%"/>
+<img src="../images/io_write_linklist_1.png" width="70%" height="70%"/>
 
-2. 
+2. T1时刻起（后续若无特别说明，假设暂时没有新的bthread再往_write_head链表中加入待写数据），bthread 1向fd写自身携带的WriteRequest 1中的数据（假设TCP长连接已建好，在ConnectIfNot内部不发起非阻塞的connect调用），执行一次写操作后，进入IsWriteComplete，判断是否写完（WriteRequest 1中的数据未写完，或者虽然WriteRequest 1的数据写完了但是还有其他bthread往链表中加入了待写数据，都算没写完。本示例中此时IsWriteComplete肯定是返回false的）；
+
+3. bthread 1所在的pthread执行进入IsWriteComplete，
 
 
 
