@@ -14,7 +14,7 @@
 
 3. 新启动的执行写操作的bthread，负责将fd的链表上的所有待写入数据写入fd（后续可能会有线程不断将待写数据加入待写链表），直到将链表清空。如果fd的内核inode缓冲区已满而不能写入，则该bthread将被挂起，让出cpu。等到epoll通知fd可写时，该thread再被唤起，继续写入。
 
-4. 
+4. KeepWrite bthread直到通过一个原子操作判断出_write_hread已为NULL时，才会执行完成，如果同时刻有一个线程通过原子操作判断出_write_hread为NULL，则重复上述过程1，所以不可能同时有两个KeepWrite bthread存在。
 
 5. 按照如上规则，所有bthread都不会有任何的等待操作，这就做到了wait-free，当然也是lock-free的（判断自己是不是第一个向fd写数据的线程的操作实际上是个原子交换操作）
 
@@ -111,8 +111,9 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
         AddOutputBytes(nw);
     }
     // 判断req指向的数据是否已写完。
-    // 在IsWriteComplete内部会判断，如果req指向的数据已全部写完，且当前时刻
+    // 在IsWriteComplete内部会判断，如果req指向的数据已全部写完，且当前时刻req是唯一待写入的数据，则IsWriteComplete返回true。
     if (IsWriteComplete(req, true, NULL)) {
+        // 回收req指向的heap内存到对象池，bthread完成任务，返回。
         ReturnSuccessfulWriteRequest(req);
         return 0;
     }
@@ -120,6 +121,9 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
 KEEPWRITE_IN_BACKGROUND:
     ReAddress(&ptr_for_keep_write);
     req->socket = ptr_for_keep_write.release();
+    // req指向的数据未全部写完，为了使pthread wait-free，启动KeepWrite bthread后，当前bthread就返回。
+    // 在KeepWrite bthread内部，不仅需要处理当前req未写完的数据，还可能要处理其他bthread加入链表的数据。
+    // KeepWrite bthread并不具有最高的优先级，所以使用bthread_start_background，将KeepWrite bthread id加到执行队列尾部
     if (bthread_start_background(&th, &BTHREAD_ATTR_NORMAL,
                                  KeepWrite, req) != 0) {
         LOG(FATAL) << "Fail to start KeepWrite";
@@ -137,7 +141,8 @@ FAIL_TO_WRITE:
 }
 ```
 
-KeepWrite
+KeepWrite函数：作为一个独立存在的bthread的任务函数，负责不停地写入所有线程加入到_write_hread链表的数据，直到链表为空
+
 ```c++
 void* Socket::KeepWrite(void* void_arg) {
     g_vars->nkeepwrite << 1;
@@ -150,14 +155,18 @@ void* Socket::KeepWrite(void* void_arg) {
     WriteRequest* cur_tail = NULL;
     do {
         // req was written, skip it.
+        // 如果req的next指针不为NULL，则已经调用过IsWriteComplete实现了单向链表的翻转，待写数据的顺序已按到达序排列，
+        // 所以如果req的next指针不为NULL且req的数据已写完，可以即刻回收req指向的内存，并将req重新赋值为下一个待写数据的指针。
         if (req->next != NULL && req->data.empty()) {
             WriteRequest* const saved_req = req;
             req = req->next;
             s->ReturnSuccessfulWriteRequest(saved_req);
         }
+        // 向fd写入一次数据，DoWrite内部的实现为尽可能的多谢，可以连带req后面的待写数据一起写。
         const ssize_t nw = s->DoWrite(req);
         if (nw < 0) {
             if (errno != EAGAIN && errno != EOVERCROWDED) {
+                // 如果不是因为内核inode输出缓存已满导致的write操作结果小于0，则标记Socket对象状态异常（TCP连接异常）
                 const int saved_errno = errno;
                 PLOG(WARNING) << "Fail to keep-write into " << *s;
                 s->SetFailed(saved_errno, "Fail to keep-write into %s: %s",
@@ -168,6 +177,8 @@ void* Socket::KeepWrite(void* void_arg) {
             s->AddOutputBytes(nw);
         }
         // Release WriteRequest until non-empty data or last request.
+        // 可能一次写入了链表中多个节点中的待写数据，数据已写完的节点回收内存。
+        // while操作结束后req指向的是已翻转的链表中的第一个数据未写完的节点。
         while (req->next != NULL && req->data.empty()) {
             WriteRequest* const saved_req = req;
             req = req->next;
@@ -180,6 +191,7 @@ void* Socket::KeepWrite(void* void_arg) {
         // Update(8/15/2017): Not working, performance downgraded.
         //if (nw <= 0 || req->data.empty()/*note*/) {
         if (nw <= 0) {
+            // 执行到这里，nw小于0的原因肯定是因为内核inode输出缓存已满。
             // 如果是由于fd的inode输出缓冲区已满导致write操作返回值小于等于0，则需要挂起执行KeepWrite的bthread，让出cpu，
             // 让该bthread所在的pthread去任务队列中取出下一个bthread去执行。等到epoll返回告知inode输出缓冲区有可写空间时，
             // 再唤起执行KeepWrite的bthread，继续向fd写入数据
@@ -191,6 +203,7 @@ void* Socket::KeepWrite(void* void_arg) {
             // growing infinitely.
             const timespec duetime =
                 butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
+            // 在WaitEpollOut内部会执行butex_wait，挂起当前bthread。当bthread重新执行时，执行点是butex_wait的函数返回点。
             const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
             if (rc < 0 && errno != ETIMEDOUT) {
                 const int saved_errno = errno;
@@ -200,6 +213,7 @@ void* Socket::KeepWrite(void* void_arg) {
                 break;
             }
         }
+        // 令cur_tail找到已翻转链表的尾节点
         if (NULL == cur_tail) {
             for (cur_tail = req; cur_tail->next != NULL;
                  cur_tail = cur_tail->next);
@@ -207,7 +221,9 @@ void* Socket::KeepWrite(void* void_arg) {
         // Return when there's no more WriteRequests and req is completely
         // written.
         if (s->IsWriteComplete(cur_tail, (req == cur_tail), &cur_tail)) {
+            // 如果IsWriteComplete返回true，则req必然，并且当前的_write_hread肯定是NULL
             CHECK_EQ(cur_tail, req);
+            // 回收内存后KeepWrite bthread就结束了，后续再有线程向fd写数据，则重复以前的逻辑。所以同一时刻只会存在一个KeepWrite bthread。
             s->ReturnSuccessfulWriteRequest(req);
             return NULL;
         }
@@ -219,6 +235,7 @@ void* Socket::KeepWrite(void* void_arg) {
 }
 ```
 
+IsWriteComplete函数：
 
 ```c++
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
