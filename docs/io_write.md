@@ -296,4 +296,15 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 
 
 ## 示例
+下面以一个实际业务场景为例，说明线程执行过程和内存变化过程：
+
+1. 假设T0时刻有3个分别被不同pthread执行的bthread同时向同一个fd写入数据，3个bthread同时进入到StartWrite函数执行_write_head.exchange原子操作，_write_head初始值是NULL，假设bthread 0第一个用自己的req指针与_write_head做exchange，则bthread 0获取了向fd写数据的权限，bthread 1和bthread 2将待发送的数据加入_write_head链表后直接return 0返回（bthread 1和bthread 2返回后会被挂起，yield让出cpu）。此时内存结构为：
+
+<img src="../images/io_write_linklist_1.png" width="100%" height="100%"/>
+
+2. 
+
+
+
+
 
