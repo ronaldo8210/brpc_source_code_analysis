@@ -1,11 +1,11 @@
-[设计原理](#设计原理) 
+[多线程向同一个TCP连接写数据的设计原理](#多线程向同一个TCP连接写数据的设计原理) 
 
-[具体实现](#具体实现) 
+[brpc中的代码实现](#brpc中的代码实现) 
 
-[示例](#示例) 
+[一个具体实例](#一个具体实例) 
 
 
-## 设计原理
+## 多线程向同一个TCP连接写数据的设计原理
 考虑brpc自带的示例程序example/multi_threaded_echo_c++/client.cpp，use_bthread为true的情况下，多个bthread通过一条TCP长连接向服务端发送数据，而多个bthread通常又是运行在多个系统线程pthread上的，所以多个pthread如何高效且线程安全地向一个TCP连接写数据，是系统设计需要重点考虑的。brpc针对这个问题的设计思路如下：
 
 1. 为每个可被多线程写入数据的fd维护一个单项链表，每个试图向fd写数据的线程首先判断自己是不是当前第一个向fd写数据的线程，如果是，则持有写数据的权限，可以执行向fd写数据的操作；如果不是，则将待写数据加入链表就即刻返回（bthread执行结束，挂起，等待响应数据）；
@@ -21,7 +21,7 @@
 下面结合brpc的源码来阐述这套逻辑的实现。
 
 
-## 具体实现
+## brpc中的具体实现
 brpc中的Socket类对象代表Client端与Server端的一条TCP连接，
 
 Socket类对象中比较重要的成员变量：
@@ -261,12 +261,16 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
         }
         return return_when_no_more;
     }
+    // 执行到这里，一定是有其他bthread将待写数据加入到了_write_head链表里，
+    // 经过compare_exchange_strong后new_head指向当前_write_head所指的WriteRequest实例，肯定是不等于old_head的。
     CHECK_NE(new_head, old_head);
     // Above acquire fence pairs release fence of exchange in Write() to make
     // sure that we see all fields of requests set.
 
     // Someone added new requests.
     // Reverse the list until old_head.
+    // 将以new_head为头节点、old_head为尾节点的单向链表做一次翻转，保证待写数据以先后顺序排序
+    // 随时可能有新的bthread将待写数据加入到_write_head链表，但暂时不考虑这些新来的数据
     WriteRequest* tail = NULL;
     WriteRequest* p = new_head;
     do {
@@ -297,8 +301,8 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 ```
 
 
-## 示例
-下面以一个实际业务场景为例，说明线程执行过程和内存变化过程：
+## 一个具体实例
+下面以一个实际场景为例，说明线程执行过程和内存变化过程：
 
 1. 假设T0时刻有3个分别被不同pthread执行的bthread同时向同一个fd写入数据，3个bthread同时进入到StartWrite函数执行_write_head.exchange原子操作，_write_head初始值是NULL，假设bthread 0第一个用自己的req指针与_write_head做exchange，则bthread 0获取了向fd写数据的权限，bthread 1和bthread 2将待发送的数据加入_write_head链表后直接return 0返回（bthread 1和bthread 2返回后会被挂起，yield让出cpu）。此时内存结构为：
 
@@ -306,9 +310,13 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 
 2. T1时刻起（后续若无特别说明，假设暂时没有新的bthread再往_write_head链表中加入待写数据），bthread 1向fd写自身携带的WriteRequest 1中的数据（假设TCP长连接已建好，在ConnectIfNot内部不发起非阻塞的connect调用），执行一次写操作后，进入IsWriteComplete，判断是否写完（WriteRequest 1中的数据未写完，或者虽然WriteRequest 1的数据写完了但是还有其他bthread往链表中加入了待写数据，都算没写完。本示例中此时IsWriteComplete肯定是返回false的）；
 
-3. bthread 1所在的pthread执行进入IsWriteComplete，
+3. bthread 1所在的pthread执行进入IsWriteComplete（假设WriteRequest 1中的数据没有全部写完），在IsWriteComplete中判断出WriteRequest 1中仍然有未写数据，并且_write_head也并不指向WriteRequest 1而是指向了新来的WriteRequest 3，为保证将数据依先后顺序写入fd，将图1所示的单向链表做翻转（代码中的_write_head.compare_exchange_strong操作的是最新的_write_head，在这个原子操作后，仍然会有bthread将待写数据加入到_write_head，_write_head会变化。但上述的链表翻转之后，如果有新来的WriteRequest暂时也不管它，后续会处理。这里先假设没有bthread加入新的待写数据）。此时内存结构为：
 
+<img src="../images/io_write_linklist_2.png" width="70%" height="70%"/>
 
+4. 因为IsWriteComplete返回了false，仍然有待写数据要写，但接下来的写操作不能再由bthread 1负责，因为剩下的待写数据也不能保证一次都写完，bthread 1不可能去等待fd的内核inode输出缓存是否有可用空间，否则会令bthread 1所在的整个pthread线程卡顿，pthread私有的TaskGroup上的任务执行队列中其他bthread就得不到及时执行了，也就不是wait-free了。因此bthread 1创建一个新的KeepWrite bthread专门负责剩余数据的发送，bthread 1即刻返回（bthread 1到这里也就完成了任务，会被挂起，yield让出cpu）。
+
+5. T3时刻起，KeepWrite bthread得到了调度，被某一个pthread执行，开始写之前剩余的数据。
 
 
 
