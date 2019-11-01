@@ -2,7 +2,7 @@
 
 [brpc中的代码实现](#brpc中的代码实现) 
 
-[一个具体实例](#一个具体实例) 
+[一个实际场景下的示例](#一个实际场景下的示例) 
 
 
 ## 多线程向同一个TCP连接写数据的设计原理
@@ -21,7 +21,7 @@
 下面结合brpc的源码来阐述这套逻辑的实现。
 
 
-## brpc中的具体实现
+## brpc中的代码实现
 brpc中的Socket类对象代表Client端与Server端的一条TCP连接，
 
 Socket类对象中比较重要的成员变量：
@@ -158,6 +158,7 @@ void* Socket::KeepWrite(void* void_arg) {
         // 如果req的next指针不为NULL，则已经调用过IsWriteComplete实现了单向链表的翻转，待写数据的顺序已按到达序排列，
         // 所以如果req的next指针不为NULL且req的数据已写完，可以即刻回收req指向的内存，并将req重新赋值为下一个待写数据的指针。
         if (req->next != NULL && req->data.empty()) {
+            // 执行到这里，就是因为虽然req指向的WriteRequest中的数据已写完，但_write_head链表中又被其他bthread加入了待写数据
             WriteRequest* const saved_req = req;
             req = req->next;
             s->ReturnSuccessfulWriteRequest(saved_req);
@@ -218,6 +219,7 @@ void* Socket::KeepWrite(void* void_arg) {
             for (cur_tail = req; cur_tail->next != NULL;
                  cur_tail = cur_tail->next);
         }
+        // 执行到这里，cur_tail指向的是当前已被翻转的链表的尾节点。
         // Return when there's no more WriteRequests and req is completely
         // written.
         if (s->IsWriteComplete(cur_tail, (req == cur_tail), &cur_tail)) {
@@ -235,13 +237,13 @@ void* Socket::KeepWrite(void* void_arg) {
 }
 ```
 
-IsWriteComplete函数：
+IsWriteComplete函数：两种情况下会调用IsWriteComplete函数，1、持有写权限的bthread向fd写自身的WriteRequest中的待写数据，写一次fd后检测自身的WriteRequest中的数据是否写完；2、被KeepWrite bthread中执行，检测上一轮经过翻转的单向链表中的各个WriteRequest中数据是否全部写完。并且IsWriteComplete函数内部还负责检测是否还有其他bthread向_write_head链表加入了新的待写数据。
 
 ```c++
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
                              bool singular_node,
                              Socket::WriteRequest** new_tail) {
-    // old_head只有两种可能：1、指向持有写权限的bthread携带的WriteRequest，2、
+    // old_head只有两种可能：1、指向持有写权限的bthread携带的WriteRequest，2、指向上一轮经过翻转的链表的尾节点。
     // 不论是哪两种，old_head指向的WriteRequest的next必然是NULL
     CHECK(NULL == old_head->next);
     // Try to set _write_head to NULL to mark that the write is done.
@@ -253,6 +255,9 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
         // Write is obviously not complete if old_head is not fully written.
         return_when_no_more = false;
     }
+    // 1、如果之前翻转的链表已全部写完，则将_write_head置为NULL，当前的KeepWrite bthread也即将结束；
+    // 2、如果之前翻转的链表未全部写完，且暂时无其他bthread向_write_head新增待写数据，_write_head指针保存原值；
+    // 3、如果之前翻转的链表未全部写完，且已经有其他bthread向_write_head新增待写数据，将new_head的值置为当前最新的_write_head值，为后续的链表翻转做准备
     if (_write_head.compare_exchange_strong(
             new_head, desired, butil::memory_order_acquire)) {
         // No one added new requests.
@@ -293,6 +298,7 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
     for (WriteRequest* q = tail; q; q = q->next) {
         q->Setup(this);
     }
+    // 将*new_tail指向当前最新的已翻转链表的尾节点。
     if (new_tail) {
         *new_tail = new_head;
     }
@@ -301,7 +307,7 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 ```
 
 
-## 一个具体实例
+## 一个实际场景下的示例
 下面以一个实际场景为例，说明线程执行过程和内存变化过程：
 
 1. 假设T0时刻有3个分别被不同pthread执行的bthread同时向同一个fd写入数据，3个bthread同时进入到StartWrite函数执行_write_head.exchange原子操作，_write_head初始值是NULL，假设bthread 0第一个用自己的req指针与_write_head做exchange，则bthread 0获取了向fd写数据的权限，bthread 1和bthread 2将待发送的数据加入_write_head链表后直接return 0返回（bthread 1和bthread 2返回后会被挂起，yield让出cpu）。此时内存结构为：
@@ -316,7 +322,15 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 
 4. 因为IsWriteComplete返回了false，仍然有待写数据要写，但接下来的写操作不能再由bthread 1负责，因为剩下的待写数据也不能保证一次都写完，bthread 1不可能去等待fd的内核inode输出缓存是否有可用空间，否则会令bthread 1所在的整个pthread线程卡顿，pthread私有的TaskGroup上的任务执行队列中其他bthread就得不到及时执行了，也就不是wait-free了。因此bthread 1创建一个新的KeepWrite bthread专门负责剩余数据的发送，bthread 1即刻返回（bthread 1到这里也就完成了任务，会被挂起，yield让出cpu）。
 
-5. T3时刻起，KeepWrite bthread得到了调度，被某一个pthread执行，开始写之前剩余的数据。
+5. T3时刻起，KeepWrite bthread得到了调度，被某一个pthread执行，开始写之前剩余的数据。假设一次向fd的写操作执行后，WriteRequest 1、WriteRequest 2中的数据全部写完（WriteRequest对象随即被回收内存），WriteRequest 3写了一部分，并且此时又有其他两个bthread向_write_head链表中新加入了待写数据WriteRequest 4和WriteRequest 5，此时内存结构为：
+
+<img src="../images/io_write_linklist_3.png" width="70%" height="70%"/>
+
+6. KeepWrite bthread执行IsWriteComplete判断之前已翻转过的链表是否已全部写完，并在IsWriteComplete内部通过_write_head.compare_exchange_strong原子操作检测到之前新增的待写数据WriteRequest 4、5，并完成WriteRequest 5->4->3链表的翻转。假设在_write_head.compare_exchange_strong执行之后立即有其他bthread又向_write_head链表中新加入了待写数据WriteRequest 6和WriteRequest 7，但WriteRequest 6和7在_write_head.compare_exchange_strong一旦被调用之后是暂时被无视的，等到下一轮调用IsWriteComplete时才会被发现（通过_write_head.compare_exchange_strong发现最新的_write_head不等于之前已被翻转的链表的尾节点）。此时内存结构为：
+
+<img src="../images/io_write_linklist_4.png" width="70%" height="70%"/>
+
+7. 
 
 
 
