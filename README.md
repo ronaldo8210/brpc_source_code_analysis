@@ -1,10 +1,10 @@
-## 目录
+# 目录
 * [brpc使用的线程模型](docs/thread_model.md)
 * [M:N线程库]
   * [bthread原理]()
-  * [pthread调度执行bthread的方式]
+  * [pthread调度执行bthread]
   * [pthread线程间的Futex同步](docs/futex.md)
-  * [bthread间的同步策略](docs/bthread_sync_strategy.md)
+  * [Butex机制：bthread级别的挂起与唤醒](docs/bthread_sync_strategy.md)
 * 网络数据IO的处理方法
   * [protobuf编程模式](docs/io_protobuf.md)
   * [多线程向同一TCP连接写入数据](docs/io_write.md)
