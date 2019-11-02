@@ -2,33 +2,40 @@
 
 [数据发送过程中的系统内存布局与多线程执行状态](#数据发送过程中的系统内存布局与多线程执行状态) 
 
-# 数据发送过程涉及到的主要数据结构
-Channel
+## 数据发送过程涉及到的主要数据结构
+### Channel实例
+Channel实例表示客户端与一台服务器或一组服务器的连接通道，主要的成员函数有：
 
-Controller
+CallMethod：
+
+### Controller实例
+Controller实例存储一次完整的RPC请求的Context以及各种状态，主要的成员变量有：
 
 
 
-# 数据发送过程中的系统内存布局与多线程执行状态
-以brpc自带的实例程序example/multi_threaded_echo_c++/client.cpp为例，结合Client端内存布局的变化过程，讲述无异常状态下的Client发送请求直到处理响应的过程。
+### Butex实例
 
-该程序运行后，与单台服务器建立一条TCP长连接，创建N个bthread在此TCP连接上发送、接收数据，不涉及连接池、负载均衡。
+### Id实例
 
-这个程序的具体运行过程为：
-1. 在main函数的栈上创建Channel；
-2. 在heap内存上惰性初始化下列全局对象：
 
-   a. 一个TaskControl单例对象；
+## 数据发送过程中的系统内存布局与多线程执行状态
+以brpc自带的实例程序example/multi_threaded_echo_c++/client.cpp为例，结合Client端内存布局的变化过程和多线程执行过程，阐述无异常状态下（所有发送数据都及时得到响应，没有超时、没有因服务器异常等原因引发的请求重试）的Client发送请求直到处理响应的过程。
+
+该程序运行后，会与单台服务器建立一条TCP长连接，创建thread_num个bthread（后续假设thread_num=3）在此TCP连接上发送、接收数据，不涉及连接池、负载均衡。
+
+具体运行过程为：
+
+1. 在main函数的栈上创建一个Channel对象，并初始化Channel的协议类型、连接类型、RPC超时时间、请求重试次数等参数，上述参数后续会被赋给所有通过此Channel的RPC请求；
+
+2. 在main函数中调用bthread_start_background创建3个bthread，此时TaskControl、TaskGroup对象都并不存在，所以此时需要在heap内存上创建它们（惰性初始化方式，不是在程序启动时就创建所有的对象，而是到对象确实要被用到时才去创建）：
+
+   - 一个TaskControl单例对象；
    
-   b. N个TaskGroup对象，每个TaskGroup对应一个系统线程pthread，是pthread的线程私有对象，每个pthread启动后执行TaskGroup的run_main_task函数，该函数是个无限循环，不停地获取bthread、执行bthread任务；
-   
-   c. 一个定时器对象。
+   - N个TaskGroup对象（后续假设N=4），每个TaskGroup对应一个系统线程pthread，是pthread的线程私有对象，每个pthread启动后以自己的TaskGroup对象的run_main_task函数作为主工作函数，在该函数内执行无限循环，不断地从TaskGroup的任务队列中取得bthread id、通过id找到bthread对象、去执行bthread任务函数；
    
 3. 在TaskMeta对象池中创建N个TaskMeta对象（每个TaskMeta相当于一个bthread）（后续设N=3），每个TaskMeta的fn函数指针指向static类型函数sender，sender就是bthread的任务处理函数。每个TaskMeta创建完后，按照散列规则将其唯一标识tid压入一个TaskGroup对象的_remote_rq队列中。（TaskGroup所属的pthread线程称为worker线程，worker线程自己产生的bthread的tid会被压入_rq队列，这个实例中的main函数所在线程不属于worker线程，所以main函数的线程生成的bthread的tid会被压入TaskGroup的_rq队列）；
 
-4. main函数执行到这里，不能直接结束，需要等待N个bthread任务全部执行完成后，才能结束。等待的实现机制是将main函数所在线程的信息存储在ButexPthreadWaiter中，并加入到bthread对应的TaskMeta的Butex的waiters队列中，等到TaskMeta的任务函数fn执行结束后，从waiters中找到等待中的pthread线程，将其唤醒。main函数所在的系统线程在join第一个bthread 1的时候就被挂起，等待在wait_pthread函数处。bthread 1执行结束后，main函数的线程才会被唤醒，继续向下执行，去join 下一个bthread。此时bthread 2可能是已经结束的状态，代码中也有相应的处理，判断出bthread 2工作结束，main的线程不会被挂起。
-
-程序运行到此的状态是，三个bthread A、B、C已经创建完毕，bthread id已经被压入TaskGroup对象的任务队列_remote_rq，TaskGroup所属的pthread线程即将拿到bthread id，main函数所在线程被挂起，等待bthread A的结束。此时系统中存在5个线程：4个线程在各自的TaskGroup私有对象上不停地等待任务、处理任务，和main函数所在线程。此时刻的系统中的内存布局如下：
+4. main函数执行到这里，不能直接结束，需要等待N个bthread任务全部执行完成后，才能结束。等待的实现机制是将main函数所在线程的信息存储在ButexPthreadWaiter中，并加入到bthread对应的TaskMeta的Butex的waiters队列中，等到TaskMeta的任务函数fn执行结束后，从waiters中找到等待中的pthread线程，将其唤醒。main函数所在的系统线程在join第一个bthread 1的时候就被挂起，等待在wait_pthread函数处。bthread 1执行结束后，main函数的线程才会被唤醒，继续向下执行，去join 下一个bthread。此时bthread 2可能是已经结束的状态，代码中也有相应的处理，判断出bthread 2工作结束，main的线程不会被挂起。程序运行到此的状态是，三个bthread A、B、C已经创建完毕，bthread id已经被压入TaskGroup对象的任务队列_remote_rq，TaskGroup所属的pthread线程即将拿到bthread id，main函数所在线程被挂起，等待bthread A的结束。此时系统中存在5个线程：4个线程在各自的TaskGroup私有对象上不停地等待任务、处理任务，和main函数所在线程。此时刻的系统中的内存布局如下：
 
 <img src="../images/client_send_req_1.png" width="70%" height="70%"/>
 
