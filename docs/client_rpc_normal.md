@@ -21,7 +21,7 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
 ## 数据发送过程中的系统内存布局与多线程执行状态
 以brpc自带的实例程序example/multi_threaded_echo_c++/client.cpp为例，结合Client端内存布局的变化过程和多线程执行过程，阐述无异常状态下（所有发送数据都及时得到响应，没有超时、没有因服务器异常等原因引发的请求重试）的Client发送请求直到处理响应的过程。
 
-该程序运行后，会与单台服务器建立一条TCP长连接，创建thread_num个bthread（后续假设thread_num=3）在此TCP连接上发送、接收数据，不涉及连接池、负载均衡。
+该程序运行后，会与单台服务器建立一条TCP长连接，创建thread_num个bthread（后续假设thread_num=3）在此TCP连接上发送、接收数据，不涉及连接池、负载均衡。RPC使用同步方式，这里的同步是指bthread间的同步：负责发送数据的bthread完成发送操作后，不能结束，而是需要挂起，等待负责接收服务器响应的bthread将其唤醒后，再恢复执行。挂起时会让出cpu，pthread可继续执行任务队列中的其他bthread。
 
 具体运行过程为：
 
@@ -65,7 +65,19 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
    
    - 在CallMethod中会通过将Id对象的butex指针指向的Butex结构的value值置为“locked_ver”表示Id对象已被锁，即当前发送数据的bthread正在访问Controller对象。在本文中假设发送数据后正常接收到响应，不涉及重试、RPC超时等，所以深入阐述Id对象，关于Id的细节请参考[这篇文章](client_bthread_sync.md)。
 
-9. 线程执行流程转入Controller的IssueRPC函数，在该函数中按照指定协议格式将第一次请求的call_id、RPC方法名、实际待发送数据打包成报文，调用Socket的Write方法将报文通过TCP长连接发给服务器。Socket的Write函数具体运作过程参考[多线程向同一TCP连接写数据](io_write.md)。调用Write函数后，负责数据发送的bthread就完成了发送工作，需要调用bthread_id_unlock释放对Controller对象的独占访问。如果是bthread间synchronous方式，则负责数据发送的bthread调用bthread_id_join挂起，让出cpu，等待负责处理response的bthread来唤醒。
+9. pthread线程执行流程接着进入Controller的IssueRPC函数，在该函数中：
 
-程序运行到此的状态是，
+   - 按照指定协议格式将RPC过程的首次请求的call_id、RPC方法名、实际待发送数据打包成报文；
+   
+   - 调用Socket::Write函数执行实际的发送数据过程。Socket对象表示Client与单台Server的连接。向fd写入数据的细节过程参考[这篇文章](io_write.md)；
+   
+   - 
+   
+   - 从Socket::Write函数返回后，调用bthread_id_unlock释放对Controller对象的独占访问。
+   
+10. 因为RPC使用synchronous同步方式，所以bthread完成数据发送后调用bthread_id_join将自身挂起，让出cpu，等待负责接收服务器响应的bthread来唤醒。此时bthread 1、2、3都已挂起，执行bthread任务的pthread 1、2、3分别跳出了bthread 1、2、3的任务函数，回到TaskGroup::run_main_task函数继续等待新的bthread任务，因为在向fd写数据的过程中通常会新建一个KeepWrite bthread，假设这个bthread的id被压入到TaskGroup 4的任务队列中，被pthread 4执行，所以pthread 1、2、3此时没有新bthread可供执行，处于系统线程挂起状态。
+
+11. 此时Client进程内部的线程状态是：
+
+12. 此时Client进程内部的内存布局如下：
 
