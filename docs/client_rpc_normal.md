@@ -81,3 +81,6 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
 
 12. 此时Client进程内部的内存布局如下：
 
+<img src="../images/client_send_req_2.png" width="100%" height="100%"/>
+
+13. 
