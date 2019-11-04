@@ -1,8 +1,8 @@
 # 目录
 * [brpc使用的线程模型](docs/thread_model.md)
 * M:N线程库
-  * [bthread原理]()
-  * [pthread调度执行bthread]()
+  * bthread原理
+  * pthread调度执行bthread
   * [pthread线程间的Futex同步](docs/futex.md)
   * [Butex机制：bthread级别的挂起与唤醒](docs/butex.md)
 * 网络数据IO的处理方法
