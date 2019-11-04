@@ -49,7 +49,9 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
    
    - pthread状态：此时进程中存在5个pthread线程：3个pthread即将从各自私有的TaskGroup对象的_remote_rq中拿到bthread id，将要执行bthread id对应的TaskMeta对象的任务函数；1个pthread仍然阻塞在run_main_task函数上，等待新任务到来通知；main函数所在线程被挂起，等待bthread 1执行结束。
    
-6. 此时Client进程内部的内存布局如下：
+6. 此时Client进程内部的内存布局如下图所示：
+   
+    - 由于bthread 1、2、3还未开始运行，未分配任何局部变量，所以此时各自的私有栈都是空的。
 
 <img src="../images/client_send_req_1.png" width="70%" height="70%"/>
 
@@ -71,7 +73,7 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
    
    - 调用Socket::Write函数执行实际的发送数据过程。Socket对象表示Client与单台Server的连接。向fd写入数据的细节过程参考[这篇文章](io_write.md)；
    
-   - 
+   - 在实际发送数据前需要先建立与Server的TCP长连接，并惰性初始化event_dispatcher_num个EventDispatcher对象（假设event_dispatcher_num=2），从而新建2个bthread 4和5，并将它们的任务处理函数设为static类型的EventDispatcher::RunThis函数，当bthread 4、5得到pthread执行时，会调用epoll_wait检测是否有I/O事件触发。brpc是没有专门的I/O pthread线程的；
    
    - 从Socket::Write函数返回后，调用bthread_id_unlock释放对Controller对象的独占访问。
    
@@ -79,8 +81,10 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
 
 11. 此时Client进程内部的线程状态是：
 
-12. 此时Client进程内部的内存布局如下：
+12. 此时Client进程内部的内存布局如下图所示：
+
+   - 
 
 <img src="../images/client_send_req_2.png" width="100%" height="100%"/>
 
-13. 
+13. 3个请求都发出后，假设服务器正常返回了3个响应，
