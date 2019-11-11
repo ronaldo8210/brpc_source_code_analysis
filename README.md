@@ -1,14 +1,14 @@
 # 目录
 * [brpc使用的线程模型](docs/thread_model.md)
 * M:N线程库
-  * bthread原理
-  * pthread调度执行bthread
+  * [bthread基础](docs/bthread_basis.md)
+  * [pthread调度执行bthread](docs/bthread_schedule.md)
   * [pthread线程间的Futex同步](docs/futex.md)
   * [Butex机制：bthread级别的挂起与唤醒](docs/butex.md)
 * 网络数据IO的处理方法
   * [protobuf编程模式](docs/io_protobuf.md)
   * [多线程向同一TCP连接写入数据](docs/io_write.md)
-  * [从TCP连接读取数据](docs/io_read.md)
+  * [从TCP连接读取数据的并发处理](docs/io_read.md)
 * Client端执行流程
   * [无异常状态下的一次完整RPC请求过程](docs/client_rpc_normal.md)
   * [RPC请求可能遇到的多种异常及应对策略](docs/client_rpc_exception.md)
@@ -22,6 +22,6 @@
   * bvar库
   * 常用性能监控指标
 * 基础库
-  * 对象池
+  * [对象池](docs/resource_pool.md)
   * 定时器
   * [侵入式双向链表](docs/linkedlist.md)
