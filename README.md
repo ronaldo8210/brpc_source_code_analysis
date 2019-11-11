@@ -13,7 +13,7 @@
   * [无异常状态下的一次完整RPC请求过程](docs/client_rpc_normal.md)
   * [RPC请求可能遇到的多种异常及应对策略](docs/client_rpc_exception.md)
   * [重试&Backup Request](docs/client_retry.md)
-  * [同一RPC过程中各个bthread间的同步](docs/client_bthread_sync.md)
+  * [同一RPC过程中各个bthread间的互斥](docs/client_bthread_sync.md)
 * Server端执行流程
   * 处理一次请求的完整过程
   * 服务限流
