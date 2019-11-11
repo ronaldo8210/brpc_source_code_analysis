@@ -20,21 +20,40 @@
 4. 第一次Request或者任何一次重试Request，与Backup Request可能同时刻收到Response，此时也可能到了RPC超时时间，分别处理两个Response的bthread和处理RPC超时定时任务的bthread，三者之间需要做互斥。
 
 ## bthread互斥过程涉及到的数据结构
-一次RPC过程中，Controller对象是本次RPC的数据集，
+一次RPC过程中，会有一个Controller对象贯穿本次RPC的始终，Controller对象内存储本次RPC的各类数据和各种状态，bthread间的互斥就是指同一时刻只能有一个bthread在访问Controller对象。互斥主要是通过Id对象和Butex对象实现的。
+
+1. Id对象
+
+   brpc会在每一次RPC过程开始阶段创建本次RPC唯一的一个Id对象，用来保护Controller对象，互斥试图同时访问Controller对象的多个bthread。Id对象主要成员有：
+
+   - first_ver & locked_ver
+   
+     如果Id对象的butex指针指向的Butex对象的value值为first_ver，表示Controller对象此时没有bthread在访问。此时如果有一个bthread试图访问Controller对象，则它可以取得访问权，先将butex指针指向的Butex对象的value值置为locked_ver后，再去访问Controller对象。
+     
+     在locked_ver的基础上又有contended_ver、unlockable_ver、end_ver，contended_ver = locked_ver + 1，unlockable_ver = locked_ver + 2，end_ver = locked_ver + 3。
+     
+     contended_ver表示同时访问Controller对象的多个bthread产生了竞态。如果有一个bthread（bthread 1）在访问Controller对象结束后，观察到butex指针指向的Butex对象的value值仍为locked_ver，表示没有其他的bthread在等待访问Controller对象，bthread 1在将Butex对象的value值改为first_ver后不会再有其他动作。如果在bthread 1访问Controller对象期间又有bthread 2试图访问Controller对象，bthread 2会观察到Butex对象的value值为locked_ver，bthread 2首先将Butex对象的value值改为contended_ver，意图就是告诉bthread 1产生了竞态。接着bthread 2需要将自身的bthread id等信息存储在Butex对象的waiters等待队列中，yield让出cpu，让bthread 2所在的pthread去执行TaskGroup任务队列中的下一个bthread任务。当bthread 1完成对Controller对象的访问时，会观察到Butex对象的value值已被改为contended_ver，bthread 1会到waiters队列中找到被挂起的bthread 2的id，通知TaskControl将bthread 2的id压入某一个TaskGroup的任务队列，这就是唤醒了bthread 2。bthread 1唤醒bthread 2后会将Butex对象的value值再次改回first_ver。bthread 2重新被某一个pthread调度执行时，如果这期间没有其他bthread在访问Controller对象，bthread 2会观察到Butex对象的value值为first_ver，这时bthread 2获得了Controller对象的访问权。
+     
+     
+
+   - mutex
+   
+     类似futex的线程锁，由于试图同时访问同一Controller对象的若干bthread可能在不同的系统线程pthread上被执行，所以bthread在修改Id对象中的字段前需要先做pthread间的互斥
+
+   - data
+   
+     指向本次RPC唯一的一个Controller对象的指针
+
+   - butex
+   
+     指向一个Butex对象头节点的指针，
+     
+   - join_butex
+   
+     
+Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
 
 <img src="../images/client_bthread_sync_1.png" width="60%" height="60%"/>
-
-Id结构主要字段：
-
-first_ver：如果Butex结构的value值为first_ver，则表示当前没有bthread在访问Controller结构
-
-locked_ver：如果Butex结构的value值被设为locked_ver，则表示当前已有一个bthread在操作Controller
-
-mutex：类似futex的线程锁，由于试图操作同一Controller的若干bthread可能在不同的系统线程pthread上被执行，所以同时访问Controller时需要先做pthread间的互斥
-
-data：指向Controller的指针
-
-Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
 
 
 ## brpc实现bthread互斥的源码解释
