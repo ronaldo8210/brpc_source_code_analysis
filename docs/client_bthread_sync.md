@@ -34,7 +34,11 @@
      
      contended_ver表示同时访问Controller对象的多个bthread产生了竞态。如果有一个bthread（bthread 1）在访问Controller对象结束后，观察到butex指针指向的Butex对象的value值仍为locked_ver，表示没有其他的bthread在等待访问Controller对象，bthread 1在将Butex对象的value值改为first_ver后不会再有其他动作。如果在bthread 1访问Controller对象期间又有bthread 2试图访问Controller对象，bthread 2会观察到Butex对象的value值为locked_ver，bthread 2首先将Butex对象的value值改为contended_ver，意图就是告诉bthread 1产生了竞态。接着bthread 2需要将自身的bthread id等信息存储在Butex对象的waiters等待队列中，yield让出cpu，让bthread 2所在的pthread去执行TaskGroup任务队列中的下一个bthread任务。当bthread 1完成对Controller对象的访问时，会观察到Butex对象的value值已被改为contended_ver，bthread 1会到waiters队列中找到被挂起的bthread 2的id，通知TaskControl将bthread 2的id压入某一个TaskGroup的任务队列，这就是唤醒了bthread 2。bthread 1唤醒bthread 2后会将Butex对象的value值再次改回first_ver。bthread 2重新被某一个pthread调度执行时，如果这期间没有其他bthread在访问Controller对象，bthread 2会观察到Butex对象的value值为first_ver，这时bthread 2获得了Controller对象的访问权。
      
+     unlockable_ver表示RPC即将完成，不允许再有bthread去访问Controller对象了。
      
+     end_ver表示一次RPC结束后，Id对象被回收到对象池中后*butex和*join_butex的值（butex和join_butex都指向Butex对象的第一个元素value，value是个整型值，所以butex和join_butex可转化为指向整型的指针）。end_ver也是被回收的Id对象再次被分配给某一次RPC过程时的first_ver值。
+     
+     locked_ver的取值和一次RPC的重试次数有关，locked_ver = first_ver + 重试次数 + 2，例如，如果一次RPC过程开始时分配给本次RPC的Id对象的first_ver=1，本次RPC最多允许重试3次，则locked_ver=6，本次RPC的唯一id _correlation_id=1，第一次请求的call_id=2，第一次重试的call_id=3，第二次重试的call_id=4，第三次重试的call_id=5，contended_ver=7，unlockable_ver=8，end_ver=9（_correlation_id和call_id的值只是举例，实际上_correlation_id和call_id都是64bit整型值，前32bit为Id对象在对象池中的slot位移，后32bit为上述的1、2、3...等版本号。服务器返回的Response会回传call_id，通过call_id的前32bit可以在O(1)时间内定位到本次RPC对应的Id对象，方便进行后续的bthread互斥等操作）。
 
    - mutex
    
@@ -46,12 +50,15 @@
 
    - butex
    
-     指向一个Butex对象头节点的指针，
+     指向一个Butex对象头节点的指针，该Butex对象用来互斥同时访问Controller对象的多个bthread，waiter队列存储被挂起的等待Controller对象访问权的bthread的tid等信息。
      
    - join_butex
    
-     
-Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
+     指向另一个Butex对象头节点的指针，如果RPC过程是同步方式，该Butex对象用来同步发起RPC过程的bthread和成功将服务器的Response存入Controller对象的bthread：发起RPC过程的bthread（bthread 1）会执行第一次发送请求的动作，然后会将自己的bthread id等信息存储在join_butex指向的Butex对象的waiters队列中，yield让出cpu，等待某一个能够成功将服务器的Response存入Controller对象的bthread将其唤醒。不论是处理第一次请求的Response的bthread，还是处理某一次重试请求的Response的bthread，只要有一个bthread将Response成功存入Controller对象，就从join_butex指向的Butex对象的waiters队列中拿到bthread 1的bthread id，通知TaskControl将bthread 1的id压入某一个TaskGroup的任务队列，这就是唤醒了bthread 1，bthread 1被某一个pthread重新执行后会从Controller对象中得到Response，进行后续的Response处理工作。
+   
+2. Butex对象
+
+   Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
 
 <img src="../images/client_bthread_sync_1.png" width="60%" height="60%"/>
 
