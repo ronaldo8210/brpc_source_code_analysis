@@ -11,16 +11,16 @@
   * [从TCP连接读取数据](docs/io_read.md)
 * Client端执行流程
   * [无异常状态下的一次完整RPC请求过程](docs/client_rpc_normal.md)
-  * [重试策略](docs/client_retry.md)
-  * [Backup Request](docs/client_backup_request.md)
+  * [重试&Backup Request](docs/client_retry.md)
   * [同一RPC过程中各个bthread间的同步](docs/client_bthread_sync.md)
 * Server端执行流程
   * 处理一次请求的完整过程
   * 服务限流
   * 防雪崩
-* 性能监控
-* 基础工具库
+* brpc的实时监控
+  * bvar库
+  * 常用性能监控指标
+* 基础库
   * 对象池
   * 定时器
-  * 多线程环境下的计数器
   * [侵入式双向链表](docs/linkedlist.md)
