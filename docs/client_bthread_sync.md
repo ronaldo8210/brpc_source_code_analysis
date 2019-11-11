@@ -1,12 +1,26 @@
-## 概述
-在一次RPC过程中，由于设置超时定时器和开启Backup Request机制，不同的bthread可能会同时操作该次RPC独有的Controller结构，会存在下列几种竞态情况：
-* 第一次Request发出后，在backup_request_ms内未收到响应，触发Backup Request定时器，定时任务执行的同时可能收到了第一次Request的Response，处理定时任务的bthread和处理Response的bthread需要做互斥
-* 第一次Request和Backup Request可能同时收到Response，分别处理两个Response的bthread间需要做互斥
+[一次RPC过程中需要bthread互斥的场景](#一次RPC过程中需要bthread互斥的场景)
 
-brpc中
+[bthread互斥过程涉及到的数据结构](#bthread互斥过程涉及到的数据结构)
 
-## 内存布局
-一次RPC过程中，Id、Controller、Butex的内存布局如下图所示：
+[brpc实现bthread互斥的源码解释](#brpc实现bthread互斥的源码解释)
+
+[bthread互斥执行时序示例](#bthread互斥执行时序示例)
+
+[一次RPC过程中发生bthread竞争时内存布局的变化过程](#一次RPC过程中发生bthread竞争时内存布局的变化过程)
+
+## 一次RPC过程中需要bthread互斥的场景
+在一次RPC过程中，由于设置RPC超时定时器和开启Backup Request机制，不同的bthread可能会同时操作本次RPC独有的Controller结构，会存在下列几种竞态情况：
+
+1. 第一次Request发出后，在backup_request_ms内未收到响应，触发Backup Request定时器，试图发送Backup Request的同时可能收到了第一次Request的Response，发送Backup Request的bthread和处理Response的bthread需要做互斥；
+
+2. 假设没有开启Backup Request机制，处理Response（可能是第一次Request的Response，也可能是某一次重试的Response）时刚好到了RPC超时时间，处理Response的bthread和处理RPC超时定时任务的bthread需要做互斥；
+
+3. 第一次Request或者任何一次重试Request，与Backup Request可能同时刻收到Response，分别处理两个Response的bthread间需要做互斥；
+
+4. 第一次Request或者任何一次重试Request，与Backup Request可能同时刻收到Response，此时也可能到了RPC超时时间，分别处理两个Response的bthread和处理RPC超时定时任务的bthread，三者之间需要做互斥。
+
+## bthread互斥过程涉及到的数据结构
+一次RPC过程中，Controller对象是本次RPC的数据集，
 
 <img src="../images/client_bthread_sync_1.png" width="60%" height="60%"/>
 
@@ -23,7 +37,7 @@ data：指向Controller的指针
 Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
 
 
-## 源码解释
+## brpc实现bthread互斥的源码解释
 主要代码在src/bthread/id.cpp中，解释下几个主要的函数的作用：
 
 
@@ -269,7 +283,7 @@ int bthread_id_unlock_and_destroy(bthread_id_t id) {
 }
 ```
 
-## 执行时序示例
+## bthread互斥执行时序示例
 假设有三个bthread A、B、C（位于三个不同TaskGroup的可执行任务队列中，三个TaskGroup分别是三个pthread的线程私有对象）同时访问Controller，一个可能的执行时序如下：
 
 T1时刻：A、B、C三个bthread同时执行到
