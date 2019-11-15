@@ -11,7 +11,7 @@
   * [重试&Backup Request](docs/client_retry.md)
   * [同一RPC过程中各个bthread间的互斥](docs/client_bthread_sync.md)
 * Server端执行流程
-  * 处理一次请求的完整过程
+  * 处理一次RPC请求的完整过程
   * 服务限流
   * 防雪崩
 * 并发读写TCP连接上的数据
@@ -19,7 +19,7 @@
   * [多线程向同一TCP连接写入数据](docs/io_write.md)
   * [从TCP连接读取数据的并发处理](docs/io_read.md)
 * 内存管理
-  * [资源池](docs/resource_pool.md)
+  * [ResourcePool：多线程下高效的内存分配与回收](docs/resource_pool.md)
   * 对象池
   * I/O读写缓冲区
 * brpc的实时监控
