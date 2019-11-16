@@ -1,6 +1,8 @@
 [多线程下内存分配与回收的设计原则](#多线程下内存分配与回收的设计原则)
 
-[brpc中ResourcePool的源码实现](#brpc中ResourcePool的源码实现)
+[ResourcePool的内存布局](#ResourcePool的内存布局)
+
+[ResourcePool的源码解析](#ResourcePool的源码解析)
 
 [多线程下内存分配与回收的具体示例](#多线程下内存分配与回收的具体示例)
 
@@ -19,9 +21,9 @@
 
 2. 如何避免内存碎片。brpc的ResourcePool为每一个类型的对象（TaskMeta、Socket、Id等）单独建立一个全局的singleton内存区，每个singleton内存区上分配的对象都是等长的，所以分配、回收过程不会有内存碎片。
 
-## brpc中ResourcePool的源码实现
+## ResourcePool的内存布局
 
-主要的源码为ResourcePool类，一个ResourcePool单例对象表示某一个类型的对象的全局singleton内存区。先解释下ResourcePool中的成员变量和几个宏所表达的意义：
+一个ResourcePool单例对象表示某一个类型的对象的全局singleton内存区。先解释下ResourcePool中的成员变量和几个宏所表达的意义：
 
 1. RP_MAX_BLOCK_NGROUP表示一个ResourcePool中BlockGroup的数量；RP_GROUP_NBLOCK表示一个BlockGroup中的Block*的数量；
 
@@ -47,10 +49,14 @@
 
 <img src="../images/.png" width="100%" height="100%"/>
 
+## ResourcePool的源码解析
+为对象分配内存和回收内存的主要代码都在ResourcePool类中。
+
+1. 为一个对象分配内存的接口函数为
 
 ## 多线程下内存分配与回收的具体示例
 
-多线程环境下高效的内存分配与回收
+
 
 柔性数组
 分配pool时需要按cacheline对齐  考虑局部性原理
