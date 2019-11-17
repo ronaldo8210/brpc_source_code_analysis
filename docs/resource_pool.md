@@ -52,7 +52,34 @@
 ## ResourcePool的源码解析
 为对象分配内存和回收内存的主要代码都在ResourcePool类中。
 
-1. 为一个对象分配内存的接口函数为
+1. 针对一种类型的对象，获取全局的ResourcePool的单例的接口函数为ResourcePool::singleton()，该函数可被多个线程同时执行，要注意代码中的double check逻辑判断：
+
+   ```c++
+    static inline ResourcePool* singleton() {
+        // 如果当前_singleton指针不为空，则之前已经有线程为_singleton赋过值，直接返回非空的_singleton值即可。
+        ResourcePool* p = _singleton.load(butil::memory_order_consume);
+        if (p) {
+            return p;
+        }
+        // 修改_singleton的代码可被多个线程同时执行，必须先加锁。
+        pthread_mutex_lock(&_singleton_mutex);
+        // double check，再次检查_singleton指针是否为空。
+        // 因为可能有两个线程同时进入ResourcePool::singleton()函数，同时检测到_singleton值为空，
+        // 接着同时执行到pthread_mutex_lock(&_singleton_mutex)，但只能有一个线程（A）执行_singleton.store()，
+        // 另一个线程（B）必须等待。线程A执行pthread_mutex_unlock(&_singleton_mutex)后，线程B恢复执行，必须再次
+        // 判断_singleton是否为空，因为_singleton之前已经被线程A赋了值，线程B不能再次给_singleton赋值。
+        p = _singleton.load(butil::memory_order_consume);
+        if (!p) {
+            // 创建一个新的ResourcePool对象，对象指针赋给_singleton。
+            p = new ResourcePool();
+            _singleton.store(p, butil::memory_order_release);
+        } 
+        pthread_mutex_unlock(&_singleton_mutex);
+        return p;
+    }
+   ```
+
+2. 为一个对象分配内存的接口函数为
 
 ## 多线程下内存分配与回收的具体示例
 
