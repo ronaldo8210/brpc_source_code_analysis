@@ -139,26 +139,101 @@
         return NULL;                                                    \
    ```
 
-  ResourcePool::LocalPool::unsafe_address_resource()函数的作用为通过一个对象id在O(1)时间内定位到该对象的地址：
+   ResourcePool::LocalPool::unsafe_address_resource()函数的作用为通过一个对象id在O(1)时间内定位到该对象的地址：
   
-  ```c++
+   ```c++
+    static inline T* unsafe_address_resource(ResourceId<T> id) {
+        const size_t block_index = id.value / BLOCK_NITEM;
+        return (T*)(_block_groups[(block_index >> RP_GROUP_NBLOCK_NBIT)]
+                    .load(butil::memory_order_consume)
+                    ->blocks[(block_index & (RP_GROUP_NBLOCK - 1))]
+                    .load(butil::memory_order_consume)->items) +
+               id.value - block_index * BLOCK_NITEM;
+    }
+   ```
   
-  ```
+   ResourcePool::add_block_group()函数作用是新建一个BlockGroup并加入ResourcePool单例的_block_groups数组：
   
-  ResourcePool::add_block_group()函数作用是新建一个BlockGroup并加入ResourcePool单例的_block_groups数组：
+   ```c++
+    static bool add_block_group(size_t old_ngroup) {
+        BlockGroup* bg = NULL;
+        BAIDU_SCOPED_LOCK(_block_group_mutex);
+        const size_t ngroup = _ngroup.load(butil::memory_order_acquire);
+        if (ngroup != old_ngroup) {
+            // Other thread got lock and added group before this thread.
+            return true;
+        }
+        if (ngroup < RP_MAX_BLOCK_NGROUP) {
+            bg = new(std::nothrow) BlockGroup;
+            if (NULL != bg) {
+                // Release fence is paired with consume fence in address() and
+                // add_block() to avoid un-constructed bg to be seen by other
+                // threads.
+                _block_groups[ngroup].store(bg, butil::memory_order_release);
+                _ngroup.store(ngroup + 1, butil::memory_order_release);
+            }
+        }
+        return bg != NULL;
+    }
+   ```
   
-  ```c++
+   ResourcePool::add_block()函数作用是新建一个Block并将Block的地址加入当前未满的BlockGroup的blocks数组：
   
-  ```
+   ```c++
+    static Block* add_block(size_t* index) {
+        Block* const new_block = new(std::nothrow) Block;
+        if (NULL == new_block) {
+            return NULL;
+        }
+
+        size_t ngroup;
+        do {
+            ngroup = _ngroup.load(butil::memory_order_acquire);
+            if (ngroup >= 1) {
+                BlockGroup* const g =
+                    _block_groups[ngroup - 1].load(butil::memory_order_consume);
+                const size_t block_index =
+                    g->nblock.fetch_add(1, butil::memory_order_relaxed);
+                if (block_index < RP_GROUP_NBLOCK) {
+                    g->blocks[block_index].store(
+                        new_block, butil::memory_order_release);
+                    *index = (ngroup - 1) * RP_GROUP_NBLOCK + block_index;
+                    return new_block;
+                }
+                g->nblock.fetch_sub(1, butil::memory_order_relaxed);
+            }
+        } while (add_block_group(ngroup));
+
+        // Fail to add_block_group.
+        delete new_block;
+        return NULL;
+    }
+   ```
   
-  ResourcePool::add_block()函数作用是新建一个Block并将Block的地址加入当前未满的BlockGroup的blocks数组：
-  
-  ```c++
-  
-  ```
-  
-  ResourcePool::pop_free_chunk()函数作用是
-  
+   ResourcePool::pop_free_chunk()函数作用是从全局的存满空闲对象id的空闲列表队列中弹出一个空闲对象列表，将其内容拷贝到线程私有的空闲对象列表中（拷贝前线程私有的空闲对象列表一定是空的）：
+   
+   ```c++
+    bool pop_free_chunk(FreeChunk& c) {
+        // Critical for the case that most return_object are called in
+        // different threads of get_object.
+        if (_free_chunks.empty()) {
+            return false;
+        }
+        pthread_mutex_lock(&_free_chunks_mutex);
+        if (_free_chunks.empty()) {
+            pthread_mutex_unlock(&_free_chunks_mutex);
+            return false;
+        }
+        DynamicFreeChunk* p = _free_chunks.back();
+        _free_chunks.pop_back();
+        pthread_mutex_unlock(&_free_chunks_mutex);
+        c.nfree = p->nfree;
+        memcpy(c.ids, p->ids, sizeof(*p->ids) * p->nfree);
+        free(p);
+        return true;
+    }
+   ```
+3. 回收对象内存的接口函数为ResourcePool::return_resource()，  
   
 ## 多线程下内存分配与回收的具体示例
 
