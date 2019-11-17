@@ -111,7 +111,9 @@
         if (_cur_block && _cur_block->nitem < BLOCK_NITEM) {            \
             // _cur_block_index是当前的Block在全局所有的Block中的索引号，
             // BLOCK_NITEM是一个Block中最大能存储的对象的个数（一个Block中存储的所有对象肯定是同一类型的），
-            // 
+            // _cur_block->nitem是线程私有的Block中已经分配内存的对象个数（对象可能是正在使用，也可能是已经被回收），
+            // 所以一个新分配内存的对象的id值就等于当前全局已被分配内存的所有对象的个数，即新对象所占内存空间在全局
+            // 对象池中的偏移量。
             id->value = _cur_block_index * BLOCK_NITEM + _cur_block->nitem; \
             T* p = new ((T*)_cur_block->items + _cur_block->nitem) T CTOR_ARGS; \
             if (!ResourcePoolValidator<T>::validate(p)) {               \
@@ -122,6 +124,7 @@
             return p;                                                   \
         }                                                               \
         /* Fetch a Block from global */                                 \
+        // 线程私有的Block已用满，再从该类型对象的全局内存区中再申请一块Block。
         _cur_block = add_block(&_cur_block_index);                      \
         if (_cur_block != NULL) {                                       \
             id->value = _cur_block_index * BLOCK_NITEM + _cur_block->nitem; \
@@ -136,6 +139,27 @@
         return NULL;                                                    \
    ```
 
+  ResourcePool::LocalPool::unsafe_address_resource()函数的作用为通过一个对象id在O(1)时间内定位到该对象的地址：
+  
+  ```c++
+  
+  ```
+  
+  ResourcePool::add_block_group()函数作用是新建一个BlockGroup并加入ResourcePool单例的_block_groups数组：
+  
+  ```c++
+  
+  ```
+  
+  ResourcePool::add_block()函数作用是新建一个Block并将Block的地址加入当前未满的BlockGroup的blocks数组：
+  
+  ```c++
+  
+  ```
+  
+  ResourcePool::pop_free_chunk()函数作用是
+  
+  
 ## 多线程下内存分配与回收的具体示例
 
 
