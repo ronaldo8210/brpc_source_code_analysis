@@ -233,16 +233,35 @@
         return true;
     }
    ```
-3. 回收对象内存的接口函数为ResourcePool::return_resource()，  
-  
-## 多线程下内存分配与回收的具体示例
+   
+3. 回收对象内存的接口函数为ResourcePool::return_resource()，内部会调用LocalPool::return_resource()函数：
 
-
+   ```c++
+   inline int return_resource(ResourceId<T> id) {
+      // Return to local free list
+      if (_cur_free.nfree < ResourcePool::free_chunk_nitem()) {
+          _cur_free.ids[_cur_free.nfree++] = id;
+          BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_ADD1;
+          return 0;
+      }
+      // Local free list is full, return it to global.
+      // For copying issue, check comment in upper get()
+      // ResourcePool::push_free_chunk()函数的作用是
+      if (_pool->push_free_chunk(_cur_free)) {
+          _cur_free.nfree = 1;
+          _cur_free.ids[0] = id;
+          BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_ADD1;
+          return 0;
+      }
+      return -1;
+   }
+   ```
+   
 
 柔性数组
 分配pool时需要按cacheline对齐  考虑局部性原理
 
-double check的几处使用
+
 
 ResourcePoolBlockItemNum  BLOCK_NITEM   一个block里面容纳Item的数量
 FREE_CHUNK_NITEM=BLOCK_NITEM
