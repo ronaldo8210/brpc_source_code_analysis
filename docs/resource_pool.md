@@ -79,7 +79,62 @@
     }
    ```
 
-2. 为一个对象分配内存的接口函数为
+2. 为一个指定类型的对象分配内存的接口函数为ResourcePool::get_resource()，根据对象的不同构造函数，get_resource()有相应的几个重载，逻辑都为先调用get_or_new_local_pool()取得线程私有的LocalPool对象，再调用LocalPool对象的get()函数，get()函数的内容封装在BAIDU_RESOURCE_POOL_GET宏中：
+
+   ```c++
+    #define BAIDU_RESOURCE_POOL_GET(CTOR_ARGS)                              \
+        /* Fetch local free id */                                       \
+        // 如果线程私有的空闲对象列表当前存有空闲对象，则直接从空闲列表拿出一个空闲对象的id。
+        if (_cur_free.nfree) {                                          \
+            const ResourceId<T> free_id = _cur_free.ids[--_cur_free.nfree]; \
+            *id = free_id;                                              \
+            BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_SUB1;                   \
+            // 使用对象id在O(1)时间内定位到空闲对象的地址，并返回。
+            return unsafe_address_resource(free_id);                    \
+        }                                                               \
+        /* Fetch a FreeChunk from global.                               \
+           TODO: Popping from _free needs to copy a FreeChunk which is  \
+           costly, but hardly impacts amortized performance. */         \
+        // 线程私有的空闲对象列表没有空闲对象可用，从全局的空闲列表队列中弹出一个空闲对象列表，
+        // 弹出的空闲对象列表存满了已被回收的空闲对象的id，将弹出的空闲对象列表的内容拷贝到线程私有空闲对象列表。
+        if (_pool->pop_free_chunk(_cur_free)) {                         \
+            // 此时线程私有的空闲对象列表存满了空闲对象的id，现在可以从中拿出一个空闲对象的id。
+            --_cur_free.nfree;                                          \
+            const ResourceId<T> free_id =  _cur_free.ids[_cur_free.nfree]; \
+            *id = free_id;                                              \
+            BAIDU_RESOURCE_POOL_FREE_ITEM_NUM_SUB1;                   \
+            // 使用对象id在O(1)时间内定位到空闲对象的地址，并返回。
+            return unsafe_address_resource(free_id);                    \
+        }                                                               \
+        /* Fetch memory from local block */                             \
+        // 全局都没有空闲对象可用，如果此时线程私有的Block中有剩余空间可用，则从私有的Block中分配一块内存给新建对象。
+        if (_cur_block && _cur_block->nitem < BLOCK_NITEM) {            \
+            // _cur_block_index是当前的Block在全局所有的Block中的索引号，
+            // BLOCK_NITEM是一个Block中最大能存储的对象的个数（一个Block中存储的所有对象肯定是同一类型的），
+            // 
+            id->value = _cur_block_index * BLOCK_NITEM + _cur_block->nitem; \
+            T* p = new ((T*)_cur_block->items + _cur_block->nitem) T CTOR_ARGS; \
+            if (!ResourcePoolValidator<T>::validate(p)) {               \
+                p->~T();                                                \
+                return NULL;                                            \
+            }                                                           \
+            ++_cur_block->nitem;                                        \
+            return p;                                                   \
+        }                                                               \
+        /* Fetch a Block from global */                                 \
+        _cur_block = add_block(&_cur_block_index);                      \
+        if (_cur_block != NULL) {                                       \
+            id->value = _cur_block_index * BLOCK_NITEM + _cur_block->nitem; \
+            T* p = new ((T*)_cur_block->items + _cur_block->nitem) T CTOR_ARGS; \
+            if (!ResourcePoolValidator<T>::validate(p)) {               \
+                p->~T();                                                \
+                return NULL;                                            \
+            }                                                           \
+            ++_cur_block->nitem;                                        \
+            return p;                                                   \
+        }                                                               \
+        return NULL;                                                    \
+   ```
 
 ## 多线程下内存分配与回收的具体示例
 
