@@ -2,6 +2,8 @@
 
 [协程的原理与实现方式](#协程的原理与实现方式)
 
+[系统线程执行多个协程时的内存布局变化过程](#系统线程执行多个协程时的内存布局变化过程)
+
 [brpc的bthread实现](#brpc的bthread实现)
 
 ## 线程执行协程与线程调用函数的不同
@@ -32,8 +34,6 @@ void foo(int a, int b) {
 一个协程可以看做是一个单独的任务，相应的也有一个任务处理函数，一个线程执行一个协程A的任务处理函数taskFunc_A时，如果想要去执行另一个协程B的任务处理函数taskFunc_B，不必等到taskFunc_A执行到return语句，可以在taskFunc_A内执行一个yield语句（yield的具体实现见下文描述），然后线程可以从taskFunc_A中跳出，去执行taskFunc_B。如果想让taskFunc_A恢复执行，则调用一个resume语句，让taskFunc_A从yield语句的返回点处开始继续执行，并且taskFunc_A的执行结果不受yield的影响。
 
 
-
-
 ## 协程的原理与实现方式
 协程有三个组成要素：一个任务函数，一个存储寄存器状态的结构，一个私有栈空间（通常是malloc分配的一块内存，或者static静态区的一块内存）。
 
@@ -44,27 +44,86 @@ void foo(int a, int b) {
 1. posix定义的ucontext数据结构如下：
 
    ```c++
-   
+   typedef struct ucontext
+   {
+     unsigned long int uc_flags;
+     // uc_link指向的ucontext是后继协程的ucontext，当前协程的任务函数return后，会自动将后继协程
+     // 的ucontext缓存的寄存器值加载到cpu的寄存器中，cpu会去执行后继协程的任务函数（可能是从函数
+     // 入口点开始执行，也可能是从函数yield调用的返回点恢复执行）。
+     struct ucontext *uc_link;  
+     // 协程私有栈。                             
+     stack_t uc_stack;
+     // uc_mcontext结构用于缓存协程被系统线程执行过程中cpu各个寄存器的当前值。
+     mcontext_t uc_mcontext;
+     __sigset_t uc_sigmask;
+   } ucontext_t;
    ```
    
-   用ucontext实现的一个协程的内存布局如下：
-   
-   
-
 2. ucontext的api接口有如下四个：
 
    - int getcontext(ucontext_t *ucp)
    
+     将cpu的各个寄存器的当前值存入当前正在被cpu执行的协程A的ucontext_t的uc_mcontext结构中。重要的寄存器有栈底指针寄存器、栈顶指针寄存器、协程A的任务函数下一条将被执行的语句的指令指针寄存器等。
+   
    - int setcontext(const ucontext_t *ucp)
+   
+     将一个协程A的ucontext_t的uc_mcontext结构中缓存的各种寄存器的值加载到cpu的寄存器中，cpu可以根据栈底指针寄存器、栈顶指针寄存器定位到该协程A的私有栈空间，根据指令指针寄存器定位到协程A的任务函数的执行点（可能为函数入口点也可能为函数yield调用的返回点），从而cpu可以去执行协程A的任务函数，并将函数执行过程中产生的局部变量等分配在协程A的私有栈上。
    
    - void makecontext(ucontext_t *ucp, void (*func)(), int argc, ...)
    
+     指定一个协程的任务函数func以及func的argc等参数。
+   
    - int swapcontext(ucontext_t *oucp, ucontext_t *ucp)
    
+     相当于getcontext(oucp) + setcontext(ucp)的原子调用，
+
+用ucontext实现的一个协程的内存布局如下图所示：
+
+<img src="../images/bthread_basis_1.png" width="20%" height="20%"/>
+
+## 系统线程执行多个协程时的内存布局变化过程
 下面通过一个示例程序，展现pthread系统线程执行多个协程时的内存变化过程：
 
 ```c++
+static ucontext_t ctx[3];
 
+static void func1(void)
+{
+    // 切换到func2
+    swapcontext(&ctx[1], &ctx[2]);
+
+    // 返回后，切换到ctx[1].uc_link，也就是main的swapcontext返回处
+}
+static void func2(void)
+{
+    // 切换到func1
+    swapcontext(&ctx[2], &ctx[1]);
+
+    // 返回后，切换到ctx[2].uc_link，也就是func1的swapcontext返回处
+}
+
+int main (void)
+{
+    // 初始化context1，绑定函数func1和堆栈stack1
+    char stack1[8192];
+    getcontext(&ctx[1]);
+    ctx[1].uc_stack.ss_sp   = stack1;
+    ctx[1].uc_stack.ss_size = sizeof(stack1);
+    ctx[1].uc_link = &ctx[0];
+    makecontext(&ctx[1], func1, 0);
+
+    // 初始化context2，绑定函数func2和堆栈stack2
+    char stack2[8192];
+    getcontext(&ctx[2]);
+    ctx[2].uc_stack.ss_sp   = stack2;
+    ctx[2].uc_stack.ss_size = sizeof(stack1);
+    ctx[2].uc_link = &ctx[1];
+    makecontext(&ctx[2], func2, 0);
+
+    // 保存当前context，然后切换到context2上去，也就是func2
+    swapcontext(&ctx[0], &ctx[2]);
+    return 0;
+}
 ```
 
 在上述程序中，pthread执行到main函数的
