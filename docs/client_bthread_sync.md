@@ -62,13 +62,12 @@
 
 假设现在有bthread 1使用同步方式发起了一次RPC请求，发送请求后bthread 1被挂起，等待有bthread向Controller对象填充请求的Response，或者超时。一段时间后处理服务器Response的bthread 2和处理超时的bthread 3同时执行，bthread 2抢到Controller的访问权，bthread 3被挂起。此时Controller、Id、Butex几种对象间的内存关系如下图所示，注意Controller对象分配在bthread 1的私有栈上，两个ButexBthreadWaiter对象也分配在相应bthread的私有栈上，Id对象和Butex对象都是通过ResourcePool机制分配的，被分配在heap堆上，Butex 2的value值是contended_ver，因为bthread 2访问Controller期间有bthread 3在排队等待，bthread 2释放Controller访问权后必须负责唤醒bthread 3，并且bthread 2成功向Controller写入了服务器的Response，满足bthread 1的唤醒条件，bthread 2还必须负责唤醒bthread 1.
 
-<img src="../images/client_bthread_sync_1.png" width="60%" height="60%"/>
+<img src="../images/client_bthread_sync_1.png" width="50%" height="50%"/>
 
 ## brpc实现bthread互斥的源码解释
-主要代码在src/bthread/id.cpp中，解释下几个主要的函数的作用：
+brpc实现bthread互斥的主要结构为Id和Butex，关于Butex的细节请见[这篇文章](butex.md)，Id相关的代码在src/bthread/id.cpp中，主要的一些函数如下：
 
-
-bthread_id_lock_and_reset_range_verbose：竞争butex锁、等待butex锁
+- bthread_id_lock_and_reset_range_verbose：竞争butex锁、等待butex锁
 
 ```c++
 // bthread访问Controller对象前必须要执行bthread_id_lock，实际上是调用bthread_id_lock_and_reset_range_verbose。
@@ -105,7 +104,8 @@ int bthread_id_lock_and_reset_range_verbose(
                     << "max range is " << bthread::ID_MAX_RANGE
                     << ", actually " << range;
             } else {
-                // range是一次RPC的重试次数，如果first_ver=1，一次RPC在超时时间内允许重试3次，则locked_ver=4。
+                // range的值是“一次RPC的重试次数+2”，
+                // 如果first_ver=1，一次RPC在超时时间内允许重试3次，则locked_ver=6。
                 meta->locked_ver = meta->first_ver + range;
             }
             // 1、如果是第一个访问Controller的bthread，则把butex指向的Butex结构的value的值置为locked_ver；
@@ -155,8 +155,7 @@ int bthread_id_lock_and_reset_range_verbose(
 }
 ```
 
-
-bthread_id_unlock：释放butex锁，唤醒一个等待锁的bthread
+- bthread_id_unlock：释放butex锁，唤醒一个等待锁的bthread
 
 ```c++
 int bthread_id_unlock(bthread_id_t id) {
@@ -211,8 +210,8 @@ int bthread_id_unlock(bthread_id_t id) {
 }
 ```
 
+- bthread_id_join：
 
-bthread_id_join：
 ```c++
 int bthread_id_join(bthread_id_t id) {
     const bthread::IdResourceId slot = bthread::get_slot(id);
@@ -242,8 +241,8 @@ int bthread_id_join(bthread_id_t id) {
 }
 ```
 
+- bthread_id_about_to_destroy：
 
-bthread_id_about_to_destroy：
 ```c++
 int bthread_id_about_to_destroy(bthread_id_t id) {
     bthread::Id* const meta = address_resource(bthread::get_slot(id));
@@ -273,7 +272,7 @@ int bthread_id_about_to_destroy(bthread_id_t id) {
 }
 ```
 
-
+- bthread_id_unlock_and_destroy：
 
 ```c++
 int bthread_id_unlock_and_destroy(bthread_id_t id) {
