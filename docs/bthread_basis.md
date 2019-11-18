@@ -31,15 +31,16 @@ void foo(int a, int b) {
 
 像上述这种在foo()函数内调用bar()函数的过程，必须等到bar()函数return后，foo()函数才从bar()函数的返回点恢复执行。
 
-一个协程可以看做是一个单独的任务，相应的也有一个任务处理函数，一个线程执行一个协程A的任务处理函数taskFunc_A时，如果想要去执行另一个协程B的任务处理函数taskFunc_B，不必等到taskFunc_A执行到return语句，可以在taskFunc_A内执行一个yield语句（yield的具体实现见下文描述），然后线程可以从taskFunc_A中跳出，去执行taskFunc_B。如果想让taskFunc_A恢复执行，则调用一个resume语句，让taskFunc_A从yield语句的返回点处开始继续执行，并且taskFunc_A的执行结果不受yield的影响。
+一个协程可以看做是一个单独的任务，相应的也有一个任务处理函数。对协程来说最重要的两个操作是yield和resume（yield和resume的实现见下文描述），yield是指一个正在被pthread系统线程执行的协程被挂起，让出cpu的使用权，pthread继续去执行另一个协程的任务函数，从协程角度看是协程中止了运行，从系统线程角度看是pthread继续在运行；resume是指一个被中止的协程的任务函数重新被pthread执行，恢复执行点为上一次yield操作的返回点。
 
+有了yield和resume这两个原语，可以实现pthread线程执行流在不同函数间的跳转，只需要将函数作为协程的任务函数即可。一个线程执行一个协程A的任务处理函数taskFunc_A时，如果想要去执行另一个协程B的任务处理函数taskFunc_B，不必等到taskFunc_A执行到return语句，可以在taskFunc_A内执行一个yield语句，然后线程可以从taskFunc_A中跳出，去执行taskFunc_B。如果想让taskFunc_A恢复执行，则调用一个resume语句，让taskFunc_A从yield语句的返回点处开始继续执行，并且taskFunc_A的执行结果不受yield的影响。
 
 ## 协程的原理与实现方式
 协程有三个组成要素：一个任务函数，一个存储寄存器状态的结构，一个私有栈空间（通常是malloc分配的一块内存，或者static静态区的一块内存）。
 
 协程被称作用户级线程就是因为协程有其私有的栈空间，pthread系统线程调用一个普通函数时，函数的栈帧、形参、局部变量都分配在pthread线程的栈上，而pthread执行一个协程的任务函数时，协程任务函数的栈帧、形参、局部变量都分配在协程的私有栈上。
 
-对协程来说最重要的两个操作是yield和resume，yield和resume有多种实现方式，可以使用posix的ucontext，boost的fcontext，或者直接用汇编实现。下面用ucontext讲述下如何实现协程的yield和resume：
+yield和resume有多种实现方式，可以使用posix的ucontext，boost的fcontext，或者直接用汇编实现。下面用ucontext讲述下如何实现协程的yield和resume：
 
 1. posix定义的ucontext数据结构如下：
 
@@ -53,7 +54,7 @@ void foo(int a, int b) {
      struct ucontext *uc_link;  
      // 协程私有栈。                             
      stack_t uc_stack;
-     // uc_mcontext结构用于缓存协程被系统线程执行过程中cpu各个寄存器的当前值。
+     // uc_mcontext结构用于缓存协程yield时，cpu各个寄存器的当前值。
      mcontext_t uc_mcontext;
      __sigset_t uc_sigmask;
    } ucontext_t;
@@ -89,9 +90,10 @@ static ucontext_t ctx[3];
 
 static void func_1(void) {
   int a;
+  // 执行点2
   // 协程1在这里yield，pthread线程恢复执行协程2的任务函数，即令协程2 resume。
   swapcontext(&ctx[1], &ctx[2]);
-  // 协程1从这里resume恢复执行
+  // 执行点4，协程1从这里resume恢复执行
   // func_1 return后，由于ctx[1].uc_link = &ctx[0]，将令main函数resume。
 }
 
@@ -99,7 +101,7 @@ static void func_2(void) {
   int b;
   // 协程2在这里yield，pthread线程去执行协程1的任务函数func_1。
   swapcontext(&ctx[2], &ctx[1]);
-  // 协程2从这里resume恢复执行
+  // 执行点3，协程2从这里resume恢复执行
   // func_2 return后，由于ctx[2].uc_link = &ctx[1]，将令协程1 resume。
 }
 
@@ -136,15 +138,20 @@ int main(int argc, char **argv) {
   // 将cpu当前各寄存器的值存入ctx[0]，将ctx[2]中存储的寄存器值加载到cpu寄存器中，
   // 也就是main函数在这里yield，开始执行协程2的任务函数func_2。
   swapcontext(&ctx[0], &ctx[2]);
-  // main函数从这里resume恢复执行。
+  // 执行点5，main函数从这里resume恢复执行。
   return 0;
 }
 ```
 
-在上述程序中，pthread系统线程执行到main函数的执行点1时，内存布局如下：
+在上述程序中，pthread系统线程执行到main函数的执行点1时，内存布局如下图所示，协程1和协程2的私有栈内存是main函数的局部变量，均分配在执行main函数的pthread的线程栈上。并且此时还未执行到swapcontext(&ctx[0], &ctx[2])，所以ctx[0]内的值都是空的：
 
 <img src="../images/bthread_basis_3.png" width="75%" height="75%"/>
 
+pthread执行了main函数中的swapcontext(&ctx[0], &ctx[2])后，main函数（也可以认为是一个协程）yield，pthread开始执行协程2的任务函数func_2，在func_2中执行swapcontext(&ctx[2], &ctx[1])后，协程2 yield，pthread开始执行协程1的任务函数func_1，pthread执行到func_1内的执行点2时，内存布局如下图所示，此时main函数和协程2都已被挂起，ctx[0]存储了pthread线程栈的基底地址和栈顶地址，以及main函数执行点5处代码的地址，ctx[2]存储了stack_2的基底地址和栈顶地址，以及func_2函数执行点3处代码的地址，协程1正在被执行过程中，没有被挂起，所以ctx[1]相比之前没有变化：
 
+<img src="../images/bthread_basis_4.png" width="75%" height="75%"/>
+
+pthread执行func_1中的swapcontext(&ctx[1], &ctx[2])后，协程1被挂起，ctx[1]存储了stack_1的基底地址和栈顶地址，以及func_1函数执行点4处代码的地址，pthread转去执行协程2的任务函数的下一条代码，也就是协程2被resume，从func_2函数的执行点3处恢复执行，接着func_2就return了，由于ctx[2].uc_link = &ctx[1]，pthread再次转去执行协程1的任务函数的下一条代码，协程1被resume，从func_1函数的执行点4处恢复执行，再接着func_1函数return，又由于ctx[1].uc_link = &ctx[0]，pthread又去执行main函数的下一条代码，main函数被resume，从执行点5处恢复恢复执行，至此协程1和协程2都执行完毕，main函数也将要return了。这个过程可以称作main函数、协程1、协程2分别在一个pthread线程上被调度执行。
 
 ## brpc的bthread实现
+bthread在协程的基础上做了扩展
