@@ -75,54 +75,68 @@ void foo(int a, int b) {
    
    - int swapcontext(ucontext_t *oucp, ucontext_t *ucp)
    
-     相当于getcontext(oucp) + setcontext(ucp)的原子调用，
+     相当于getcontext(oucp) + setcontext(ucp)的原子调用，将cpu寄存器的当前值存入oucp指向的ucontext_t的uc_mcontext结构中，并将ucp指向的ucontext_t的uc_mcontext结构中缓存的寄存器值加载到cpu的寄存器上，目的是让当前协程yield，让ucp对应的协程start或resume。
 
 用ucontext实现的一个协程的内存布局如下图所示：
 
-<img src="../images/bthread_basis_1.png" width="20%" height="20%"/>
+<img src="../images/bthread_basis_2.png" width="20%" height="20%"/>
 
 ## 系统线程执行多个协程时的内存布局变化过程
-下面通过一个示例程序，展现pthread系统线程执行多个协程时的内存变化过程：
+下面通过一个协程示例程序，展现pthread系统线程执行多个协程时的内存变化过程：
 
 ```c++
 static ucontext_t ctx[3];
 
-static void func1(void)
-{
-    // 切换到func2
-    swapcontext(&ctx[1], &ctx[2]);
-
-    // 返回后，切换到ctx[1].uc_link，也就是main的swapcontext返回处
-}
-static void func2(void)
-{
-    // 切换到func1
-    swapcontext(&ctx[2], &ctx[1]);
-
-    // 返回后，切换到ctx[2].uc_link，也就是func1的swapcontext返回处
+static void func_1(void) {
+  int a;
+  // 协程1在这里yield，pthread线程恢复执行协程2的任务函数，即令协程2 resume。
+  swapcontext(&ctx[1], &ctx[2]);
+  // 协程1从这里resume恢复执行
+  // func_1 return后，由于ctx[1].uc_link = &ctx[0]，将令main函数resume。
 }
 
-int main (void)
-{
-    // 初始化context1，绑定函数func1和堆栈stack1
-    char stack1[8192];
-    getcontext(&ctx[1]);
-    ctx[1].uc_stack.ss_sp   = stack1;
-    ctx[1].uc_stack.ss_size = sizeof(stack1);
-    ctx[1].uc_link = &ctx[0];
-    makecontext(&ctx[1], func1, 0);
+static void func_2(void) {
+  int b;
+  // 协程2在这里yield，pthread线程去执行协程1的任务函数func_1。
+  swapcontext(&ctx[2], &ctx[1]);
+  // 协程2从这里resume恢复执行
+  // func_2 return后，由于ctx[2].uc_link = &ctx[1]，将令协程1 resume。
+}
 
-    // 初始化context2，绑定函数func2和堆栈stack2
-    char stack2[8192];
-    getcontext(&ctx[2]);
-    ctx[2].uc_stack.ss_sp   = stack2;
-    ctx[2].uc_stack.ss_size = sizeof(stack1);
-    ctx[2].uc_link = &ctx[1];
-    makecontext(&ctx[2], func2, 0);
+int main(int argc, char **argv) {
+  // 定义协程1和协程2的私有栈。
+  // 在这个程序中，协程1和协程2都在main函数return之前执行完成，
+  // 所以将协程私有栈内存区定义为main函数的局部变量是安全的。
+  char stack_1[1024] = { 0 };
+  char stack_2[1024] = { 0 };
+  
+  // 初始化协程1的ucontext_t结构ctx[1]。
+  getcontext(&ctx[1]);
+  // 在ctx[1]结构中指定协程1的私有栈stack_1。
+  ctx[1].uc_stack.ss_sp   = stack_1;
+  ctx[1].uc_stack.ss_size = sizeof(stack_1);
+  // ctx[0]用于存储执行main函数所在线程的cpu的各个寄存器的值，
+  // 下面语句的作用是，当协程1的任务函数return后，将ctx[0]中存储的各寄存器的值加载到cpu的寄存器中，
+  // 也就是pthread线程从main函数之前的yield调用的返回处继续执行。
+  ctx[1].uc_link = &ctx[0];
+  // 指定协程1的任务函数为func_1。
+  makecontext(&ctx[1], func1, 0);
 
-    // 保存当前context，然后切换到context2上去，也就是func2
-    swapcontext(&ctx[0], &ctx[2]);
-    return 0;
+  // 初始化协程2的ucontext_t结构ctx[2]。
+  getcontext(&ctx[2]);
+  // 在ctx[2]结构中指定协程2的私有栈stack_2。
+  ctx[2].uc_stack.ss_sp   = stack_2;
+  ctx[2].uc_stack.ss_size = sizeof(stack_2);
+  // 协程2的任务函数return后，pthread线程将从协程1的yield调用的返回点处继续执行。
+  ctx[2].uc_link = &ctx[1];
+  // 指定协程2的任务函数为func_2。
+  makecontext(&ctx[2], func_2, 0);
+
+  // 将cpu当前各寄存器的值存入ctx[0]，将ctx[2]中存储的寄存器值加载到cpu寄存器中，
+  // 也就是main函数在这里yield，开始执行协程2的任务函数func_2。
+  swapcontext(&ctx[0], &ctx[2]);
+  // main函数从这里resume恢复执行。
+  return 0;
 }
 ```
 
