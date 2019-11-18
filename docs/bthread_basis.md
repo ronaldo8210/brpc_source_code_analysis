@@ -79,7 +79,7 @@ void foo(int a, int b) {
 
 用ucontext实现的一个协程的内存布局如下图所示：
 
-<img src="../images/bthread_basis_2.png" width="20%" height="20%"/>
+<img src="../images/bthread_basis_2.png" width="25%" height="25%"/>
 
 ## 系统线程执行多个协程时的内存布局变化过程
 下面通过一个协程示例程序，展现pthread系统线程执行多个协程时的内存变化过程：
@@ -132,6 +132,7 @@ int main(int argc, char **argv) {
   // 指定协程2的任务函数为func_2。
   makecontext(&ctx[2], func_2, 0);
 
+  // 执行点1
   // 将cpu当前各寄存器的值存入ctx[0]，将ctx[2]中存储的寄存器值加载到cpu寄存器中，
   // 也就是main函数在这里yield，开始执行协程2的任务函数func_2。
   swapcontext(&ctx[0], &ctx[2]);
@@ -140,6 +141,10 @@ int main(int argc, char **argv) {
 }
 ```
 
-在上述程序中，pthread执行到main函数的
+在上述程序中，pthread系统线程执行到main函数的执行点1时，内存布局如下：
+
+<img src="../images/bthread_basis_3.png" width="75%" height="75%"/>
+
+
 
 ## brpc的bthread实现
