@@ -154,4 +154,6 @@ pthread执行了main函数中的swapcontext(&ctx[0], &ctx[2])后，main函数（
 pthread执行func_1中的swapcontext(&ctx[1], &ctx[2])后，协程1被挂起，ctx[1]存储了stack_1的基底地址和栈顶地址，以及func_1函数执行点4处代码的地址，pthread转去执行协程2的任务函数的下一条代码，也就是协程2被resume，从func_2函数的执行点3处恢复执行，接着func_2就return了，由于ctx[2].uc_link = &ctx[1]，pthread再次转去执行协程1的任务函数的下一条代码，协程1被resume，从func_1函数的执行点4处恢复执行，再接着func_1函数return，又由于ctx[1].uc_link = &ctx[0]，pthread又去执行main函数的下一条代码，main函数被resume，从执行点5处恢复恢复执行，至此协程1和协程2都执行完毕，main函数也将要return了。这个过程可以称作main函数、协程1、协程2分别在一个pthread线程上被调度执行。
 
 ## brpc的bthread实现
-bthread在协程的基础上做了扩展
+上面的协程示例程序可以认为是实现了N:1用户级线程，即所有协程都在一个系统线程pthread上被调度执行。N:1协程的一个问题就是如果其中一个协程的任务函数在执行阻塞的网络I/O，或者在等待互斥锁，整个pthread系统线程就被挂起，其他的协程当然也无法得到执行了。brpc在N:1协程的基础上做了扩展，实现了M:N用户级线程，即N个pthread系统线程去调度执行M个协程（M远远大于N），一个pthread有其私有的任务队列，队列中存储等待执行的若干协程，一个pthread执行完任务队列中的所有协程后，也可以去其他pthread的任务队列中拿协程任务，即work-steal机制，这样的话如果一个协程在执行较为耗时的操作时，同一任务队列中的其他协程有机会被调度到其他pthread上去执行，从而实现了全局的最大并发。并且brpc也实现了协程级的互斥与唤醒，即Butex机制，通过Butex，一个协程在等待网络I/O或等待互斥锁的时候，会被自动yield让出cpu，在适当时候会被其他协程唤醒，恢复执行。关于Butex的详情参见[这篇文章](butex.md)
+
+在brpc中一个协程任务可以称作一个bthread，协程任务的定义为
