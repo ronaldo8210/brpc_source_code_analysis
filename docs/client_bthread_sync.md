@@ -24,7 +24,7 @@
 
 1. Id对象
 
-   brpc会在每一次RPC过程开始阶段创建本次RPC唯一的一个Id对象，用来保护Controller对象，互斥试图同时访问Controller对象的多个bthread。Id对象主要成员有：
+   brpc会在每一次RPC过程开始阶段创建本次RPC唯一的一个Id对象，用来保护Controller对象，互斥试图 同时访问Controller对象的多个bthread。Id对象主要成员有：
 
    - first_ver & locked_ver
    
@@ -58,10 +58,11 @@
    
 2. Butex对象
 
-   Butex结构中主要是存储了一个双向链表waiters，链表的每个元素ButexWaiter存储了挂起的bthread的一些信息
+   Butex对象主要成员是ButexWaiterList类型的waiters，waiters是个等待队列（waiters实际上是一个侵入式链表，增删操作都会在O(1)时间内完成），等待Controller访问权的bthread会在私有栈上创建一个ButexBthreadWaiter对象，并加入到waiters中，ButexBthreadWaiter对象中包含挂起的bthread的tid等信息，释放Controller访问权的bthread可以从waiters队列中拿到挂起的bthread的tid，并负责将挂起的bthread的tid加入某个TaskGroup的任务队列，让它重新得到某个pthread的调度。
+
+假设现在有bthread 1使用同步方式发起了一次RPC请求，发送请求后bthread 1被挂起，等待有bthread向Controller对象填充请求的Response，或者超时。一段时间后处理服务器Response的bthread 2和处理超时的bthread 3同时执行，bthread 2抢到Controller的访问权，bthread 3被挂起。此时Controller、Id、Butex几种对象间的内存关系如下图所示，注意Controller对象分配在bthread 1的私有栈上，两个ButexBthreadWaiter对象也分配在相应bthread的私有栈上，Id对象和Butex对象都是通过ResourcePool机制分配的，被分配在heap堆上，Butex 2的value值是contended_ver，因为bthread 2访问Controller期间有bthread 3在排队等待，bthread 2释放Controller访问权后必须负责唤醒bthread 3，并且bthread 2成功向Controller写入了服务器的Response，满足bthread 1的唤醒条件，bthread 2还必须负责唤醒bthread 1.
 
 <img src="../images/client_bthread_sync_1.png" width="60%" height="60%"/>
-
 
 ## brpc实现bthread互斥的源码解释
 主要代码在src/bthread/id.cpp中，解释下几个主要的函数的作用：
