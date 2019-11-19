@@ -50,12 +50,39 @@ Futex机制可以认为是结合了spinlock和内核态的pthread线程锁，它
    这样的实现存在一个问题，在trylock()和wait()间存在一个时间窗口，在这个时间窗口中锁变量可能发生改变。比如一个线程A调用trylock()返回失败，在调用wait()前，锁被之前持有锁的线程B释放，线程A再调用wait()就会被永久挂起，永远不会再被唤醒了。因此需要在wait()内部再次判断锁变量是否仍为在trylock()内看到的旧值，如果不是，则wait()应直接返回，再次去执行trylock()。
 
 ## brpc中Futex的实现
-brpc实现了Futex机制，主要代码在src/bthread/sys_futex.cpp中，主要有两个函数分别负责wait和wake：
+brpc实现了Futex机制，主要代码在src/bthread/sys_futex.cpp中，SimuFutex类定义了一个锁的等待队列计数等统计量，另外有两个函数分别负责wait和wake：
 
-- futex_wait_private函数
+- SimuFutex类：
 
 ```c++
+class SimuFutex {
+public:
+    SimuFutex() : counts(0)
+                , ref(0) {
+        pthread_mutex_init(&lock, NULL);
+        pthread_cond_init(&cond, NULL);
+    }
+    ~SimuFutex() {
+        pthread_mutex_destroy(&lock);
+        pthread_cond_destroy(&cond);
+    }
+
+public:
+    pthread_mutex_t lock;
+    pthread_cond_t cond;
+    // 有多少个线程在等待一个锁的时候被挂起
+    int32_t counts;
+    int32_t ref;
+};
+```
+
+- futex_wait_private函数：
+
+```c++
+// addr1是锁变量的地址，expected是在外层调用spinlock时看到的锁变量的值。
 int futex_wait_private(void* addr1, int expected, const timespec* timeout) {
+    // 调用InitFutexMap初始化全局的std::unordered_map<void*, SimuFutex>* 类型的s_futex_map，
+    // InitFutexMap仅被执行一次。
     if (pthread_once(&init_futex_map_once, InitFutexMap) != 0) {
         LOG(FATAL) << "Fail to pthread_once";
         exit(1);
@@ -68,22 +95,30 @@ int futex_wait_private(void* addr1, int expected, const timespec* timeout) {
     int rc = 0;
     {
         std::unique_lock<pthread_mutex_t> mu1(simu_futex.lock);
+        // 判断锁*addr1的当前最新值是否等于expected期望值
         if (static_cast<butil::atomic<int>*>(addr1)->load() == expected) {
+            // 锁*addr1的当前最新值与expected期望值相等，可以使用系统调用将当前线程挂起。
+            // 因为有一个线程为了等待锁而将要被挂起，锁*addr1相关的counts计数器需要递增1。
             ++simu_futex.counts;
+            // 调用pthread_cond_wait将当前线程挂起，并释放simu_futex.lock锁。
             if (timeout) {
                 timespec timeout_abs = butil::timespec_from_now(*timeout);
                 if ((rc = pthread_cond_timedwait(&simu_futex.cond, &simu_futex.lock, &timeout_abs)) != 0) {
+                    // pthread_cond_timedwait返回时会再次对simu_futex.lock上锁。
                     errno = rc;
                     rc = -1;
                 }
             } else {
                 if ((rc = pthread_cond_wait(&simu_futex.cond, &simu_futex.lock)) != 0) {
+                    // pthread_cond_wait返回时会再次对simu_futex.lock上锁。
                     errno = rc;
                     rc = -1;
                 }
             }
+            // 当前线程已被唤醒并持有了锁*addr1，counts计数器递减1。
             --simu_futex.counts;
         } else {
+            // 锁*addr1的当前最新值与expected期望值不等，需要再次执行上层的spinlock。
             errno = EAGAIN;
             rc = -1;
         }
@@ -98,7 +133,7 @@ int futex_wait_private(void* addr1, int expected, const timespec* timeout) {
 }
 ```
 
-- futex_wake_private函数
+- futex_wake_private函数：
 
 ```c++
 int futex_wake_private(void* addr1, int nwake) {
@@ -122,6 +157,7 @@ int futex_wake_private(void* addr1, int nwake) {
         std::unique_lock<pthread_mutex_t> mu1(simu_futex.lock);
         nwake = (nwake < simu_futex.counts)? nwake: simu_futex.counts;
         for (int i = 0; i < nwake; ++i) {
+            // 唤醒指定数量的在锁*addr1上挂起的线程。
             if ((rc = pthread_cond_signal(&simu_futex.cond)) != 0) {
                 errno = rc;
                 break;
