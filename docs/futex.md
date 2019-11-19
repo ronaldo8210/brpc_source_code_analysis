@@ -47,7 +47,7 @@ Futex机制可以认为是结合了spinlock和内核态的pthread线程锁，它
    }
    ```
    
-   这样的实现存在问题， 
+   这样的实现存在一个问题，在trylock()和wait()间存在一个时间窗口，在这个时间窗口中锁变量可能发生改变。比如一个线程A调用trylock()返回失败，在调用wait()前，锁被之前持有锁的线程B释放，线程A再调用wait()就会被永久挂起，永远不会再被唤醒了。因此需要在wait()内部再次判断锁变量是否仍为在trylock()内看到的旧值，如果不是，则wait()应直接返回，再次去执行trylock()。
 
 ## brpc中Futex的实现
 brpc实现了Futex机制，主要代码在src/bthread/sys_futex.cpp中，主要有两个函数分别负责wait和wake：
