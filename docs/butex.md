@@ -81,15 +81,19 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
    };
    ```
    
-   以上面的bthread 1获得了互斥锁、bthread 2和bthread 3因等待互斥锁而被挂起的场景为例，Butex的内存布局如下图所示：
+   以上面的bthread 1获得了互斥锁、bthread 2和bthread 3因等待互斥锁而被挂起的场景为例，Butex的内存布局如下图所示，展现了主要的对象间的内存关系，注意ButexBthreadWaiter变量是分配在bthread的私有栈上的：
    
-   <img src="../images/client_bthread_sync_2.png" width="100%" height="100%"/>
+   <img src="../images/butex_1.png" width="80%" height="80%"/>
 
 2. 执行bthread挂起的函数是butex_wait：
 
    ```c++
+    // arg是指向Butex::value锁变量的指针，expected_value是bthread竞争锁失败时锁变量的值。
     int butex_wait(void* arg, int expected_value, const timespec* abstime) {
+        // 通过arg定位到Butex对象的地址。
         Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+        // 如果锁变量当前最新值不等于expected_value，则锁的状态发生了变化，当前bthread不再执行挂起动作，
+        // 直接返回，在外层代码中继续去竞争锁。
         if (b->value.load(butil::memory_order_relaxed) != expected_value) {
             errno = EWOULDBLOCK;
             // Sometimes we may take actions immediately after unmatched butex,
@@ -99,8 +103,10 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
         }
         TaskGroup* g = tls_task_group;
         if (NULL == g || g->is_current_pthread_task()) {
+            // 当前代码不在bthread中执行而是在直接在pthread上执行，调用butex_wait_from_pthread让pthread挂起。
             return butex_wait_from_pthread(g, b, expected_value, abstime);
         }
+        // 创建ButexBthreadWaiter类型的局部变量bbw，bbw是分配在bthread的私有栈空间上的。
         ButexBthreadWaiter bbw;
         // tid is 0 iff the thread is non-bthread
         bbw.tid = g->current_tid();
@@ -136,8 +142,12 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
         // release fence matches with acquire fence in interrupt_and_consume_waiters
         // in task_group.cpp to guarantee visibility of `interrupted'.
         bbw.task_meta->current_waiter.store(&bbw, butil::memory_order_release);
+        // pthread在执行任务队列中下一个bthread前，会先执行wait_for_butex()将刚创建的bbw对象放入锁的等待队列。
         g->set_remained(wait_for_butex, &bbw);
+        // 当前bthread yield让出cpu，pthread会从TaskGroup的任务队列中取出下一个bthread去执行。
         TaskGroup::sched(&g);
+
+        // 这里是butex_wait()恢复执行时的开始执行点。
 
         // erase_from_butex_and_wakeup (called by TimerThread) is possibly still
         // running and using bbw. The chance is small, just spin until it's done.
@@ -172,6 +182,50 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
         }
         return 0;
     }
+   ```
+   
+   ```c++
+   static void wait_for_butex(void* arg) {
+       ButexBthreadWaiter* const bw = static_cast<ButexBthreadWaiter*>(arg);
+       Butex* const b = bw->initial_butex;
+       {
+           BAIDU_SCOPED_LOCK(b->waiter_lock);
+           // 再次判断锁变量的当前最新值是否与expected_value相等。
+           if (b->value.load(butil::memory_order_relaxed) != bw->expected_value) {
+               // 锁变量的状态发生了变化，bw代表的bthread不能挂起，要去重新竞争锁。
+               // 但bw代表的bthread之前已经yield让出cpu了，所以下面要将bw代表的bthread的id再次放入TaskGroup的
+               // 任务队列，让它恢复执行。
+               // 将bw的waiter_state更改为WAITER_STATE_UNMATCHEDVALUE，表示锁的状态已发生改变。
+               bw->waiter_state = WAITER_STATE_UNMATCHEDVALUE;
+           } else if (bw->waiter_state == WAITER_STATE_READY/*1*/ &&
+                      !bw->task_meta->interrupted) {
+               // 将bw加入到锁的等待队列，这才真正完成bthread的挂起，然后直接返回。
+               b->waiters.Append(bw);
+               bw->container.store(b, butil::memory_order_relaxed);
+               return;
+           }
+       }
+       
+       // 锁状态发生变化的情况下，才执行后面的代码。
+
+       // b->container is NULL which makes erase_from_butex_and_wakeup() and
+       // TaskGroup::interrupt() no-op, there's no race between following code and
+       // the two functions. The on-stack ButexBthreadWaiter is safe to use and
+       // bw->waiter_state will not change again.
+       unsleep_if_necessary(bw, get_global_timer_thread());
+       // 将bw代表的bthread的tid重新加入TaskGroup的任务队列。
+       tls_task_group->ready_to_run(bw->tid);
+       // FIXME: jump back to original thread is buggy.
+
+       // // Value unmatched or waiter is already woken up by TimerThread, jump
+       // // back to original bthread.
+       // TaskGroup* g = tls_task_group;
+       // ReadyToRunArgs args = { g->current_tid(), false };
+       // g->set_remained(TaskGroup::ready_to_run_in_worker, &args);
+       // // 2: Don't run remained because we're already in a remained function
+       // //    otherwise stack may overflow.
+       // TaskGroup::sched_to(&g, bw->tid, false/*2*/);
+   }
    ```
 
 3. 执行bthread唤醒的函数有butex_wake（唤醒正在等待一个互斥锁的一个bthread）、butex_wake_all（唤醒正在等待一个互斥锁的所有bthread）、butex_wake_except（唤醒正在等待一个互斥锁的除了指定bthread外的其他bthread），下面解释butex_wake的源码：
