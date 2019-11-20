@@ -18,7 +18,46 @@
 ## brpc中Butex的源码解释
 brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
 
-1. 
+1. 首先解释下Butex、ButexBthreadWaiter等主要的数据结构：
+
+   ```c++
+   struct BAIDU_CACHELINE_ALIGNMENT Butex {
+       Butex() {}
+       ~Butex() {}
+
+       butil::atomic<int> value;
+       ButexWaiterList waiters;
+       internal::FastPthreadMutex waiter_lock;
+   };
+   ```
+   
+   ```c++
+   typedef butil::LinkedList<ButexWaiter> ButexWaiterList;
+   ```
+   
+   ```c++
+   struct ButexWaiter : public butil::LinkNode<ButexWaiter> {
+       // tids of pthreads are 0
+       bthread_t tid;
+
+       // Erasing node from middle of LinkedList is thread-unsafe, we need
+       // to hold its container's lock.
+       butil::atomic<Butex*> container;
+   };
+   ```
+   
+   ```c++
+   struct ButexBthreadWaiter : public ButexWaiter {
+       TaskMeta* task_meta;
+       TimerThread::TaskId sleep_id;
+       WaiterState waiter_state;
+       int expected_value;
+       Butex* initial_butex;
+       TaskControl* control;
+   };
+   ```
+   
+   
 
 2. 执行bthread挂起的函数是butex_wait：
 
