@@ -231,61 +231,36 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
 3. 执行bthread唤醒的函数有butex_wake（唤醒正在等待一个互斥锁的一个bthread）、butex_wake_all（唤醒正在等待一个互斥锁的所有bthread）、butex_wake_except（唤醒正在等待一个互斥锁的除了指定bthread外的其他bthread），下面解释butex_wake的源码：
 
    ```c++
-    int butex_wake_all(void* arg) {
-        Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
-
-        ButexWaiterList bthread_waiters;
-        ButexWaiterList pthread_waiters;
-        {
-            BAIDU_SCOPED_LOCK(b->waiter_lock);
-            while (!b->waiters.empty()) {
-                ButexWaiter* bw = b->waiters.head()->value();
-                bw->RemoveFromList();
-                bw->container.store(NULL, butil::memory_order_relaxed);
-                if (bw->tid) {
-                    bthread_waiters.Append(bw);
-                } else {
-                    pthread_waiters.Append(bw);
-                }
-            }
-        }
-
-        int nwakeup = 0;
-        while (!pthread_waiters.empty()) {
-            ButexPthreadWaiter* bw = static_cast<ButexPthreadWaiter*>(
-                pthread_waiters.head()->value());
-            bw->RemoveFromList();
-            wakeup_pthread(bw);
-            ++nwakeup;
-        }
-        if (bthread_waiters.empty()) {
-            return nwakeup;
-        }
-        // We will exchange with first waiter in the end.
-        ButexBthreadWaiter* next = static_cast<ButexBthreadWaiter*>(
-            bthread_waiters.head()->value());
-        next->RemoveFromList();
-        unsleep_if_necessary(next, get_global_timer_thread());
-        ++nwakeup;
-        TaskGroup* g = get_task_group(next->control);
-        const int saved_nwakeup = nwakeup;
-        while (!bthread_waiters.empty()) {
-            // pop reversely
-            ButexBthreadWaiter* w = static_cast<ButexBthreadWaiter*>(
-                bthread_waiters.tail()->value());
-            w->RemoveFromList();
-            unsleep_if_necessary(w, get_global_timer_thread());
-            g->ready_to_run_general(w->tid, true);
-            ++nwakeup;
-        }
-        if (saved_nwakeup != nwakeup) {
-            g->flush_nosignal_tasks_general();
-        }
-        if (g == tls_task_group) {
-            TaskGroup::exchange(&g, next->tid);
-        } else {
-            g->ready_to_run_remote(next->tid);
-        }
-        return nwakeup;
-    }
+   // arg是Butex::value锁变量的地址。
+   int butex_wake(void* arg) {
+       // 通过arg定位到Butex对象的地址。
+       Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+       ButexWaiter* front = NULL;
+       {
+           BAIDU_SCOPED_LOCK(b->waiter_lock);
+           // 如果锁的等待队列为空，直接返回。
+           if (b->waiters.empty()) {
+               return 0;
+           }
+           // 取出锁的等待队列中第一个ButexWaiter对象的指针，并将该ButexWaiter对象从等待队列中移除。
+           front = b->waiters.head()->value();
+           front->RemoveFromList();
+           front->container.store(NULL, butil::memory_order_relaxed);
+       }
+       if (front->tid == 0) {
+           // ButexWaiter对象的tid=0说明挂起的是pthread系统线程，调用内核提供的系统调用将pthread线程唤醒。
+           wakeup_pthread(static_cast<ButexPthreadWaiter*>(front));
+           return 1;
+       }
+       ButexBthreadWaiter* bbw = static_cast<ButexBthreadWaiter*>(front);
+       unsleep_if_necessary(bbw, get_global_timer_thread());
+       // 将挂起的bthread的tid压入TaskGroup的任务队列，实现了将挂起的bthread唤醒。
+       TaskGroup* g = tls_task_group;
+       if (g) {
+           TaskGroup::exchange(&g, bbw->tid);
+       } else {
+           bbw->control->choose_one_group()->ready_to_run_remote(bbw->tid);
+       }
+       return 1;
+   }
    ```
