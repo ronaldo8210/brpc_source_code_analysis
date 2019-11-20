@@ -136,6 +136,7 @@ int bthread_id_lock_and_reset_range_verbose(
             ever_contended = true;
             // 新建ButexWaiter结构保存该bthread的主要信息并将ButexWaiter加入waiters链表，然后yield让出cpu，
             // bthread被重新执行后，从butex_wait函数返回处开始执行。
+            // 在butex_wait内部，将bthread信息加入等待队列前，要再次判断value值是否等于expected_ver，防止value值被其他bthread更改。
             if (bthread::butex_wait(butex, expected_ver, NULL) < 0 &&
                 errno != EWOULDBLOCK && errno != EINTR) {
                 return errno;
