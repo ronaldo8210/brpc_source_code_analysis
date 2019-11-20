@@ -25,19 +25,28 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
        Butex() {}
        ~Butex() {}
 
+       // 锁变量的值。
        butil::atomic<int> value;
+       // 等待队列，存储等待互斥锁的各个bthread的信息。
        ButexWaiterList waiters;
        internal::FastPthreadMutex waiter_lock;
    };
    ```
    
    ```c++
+   // 等待队列实际上是个侵入式双向链表，增减元素的操作都可在O(1)时间内完成。
    typedef butil::LinkedList<ButexWaiter> ButexWaiterList;
    ```
    
    ```c++
+   // ButexWaiter是LinkNode的子类，LinkNode里只定义了指向前后节点的指针。
    struct ButexWaiter : public butil::LinkNode<ButexWaiter> {
        // tids of pthreads are 0
+       // tid就是64位的bthread id。
+       // Butex实现了bthread间的挂起&唤醒，也实现了bthread和pthread间的挂起&唤醒，
+       // 一个pthread在需要的时候可以挂起，等待适当的时候被一个bthread唤醒，线程挂起不需要tid，填0即可。
+       // pthread被bthread唤醒的例子可参考brpc的example目录下的一些client.cpp示例程序，执行main函数的pthread
+       // 会被挂起，某个bthread执行完自己的任务后会去唤醒pthread。
        bthread_t tid;
 
        // Erasing node from middle of LinkedList is thread-unsafe, we need
@@ -47,17 +56,34 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
    ```
    
    ```c++
+   // bthread需要挂起时，会在栈上创建一个ButexBthreadWaiter对象（对象存储在bthread的私有栈空间内）并加入等待队列。
    struct ButexBthreadWaiter : public ButexWaiter {
+       // 执行bthread的TaskMeta结构的指针。
        TaskMeta* task_meta;
        TimerThread::TaskId sleep_id;
+       // 
        WaiterState waiter_state;
+       // expected_value存储的是当bthread竞争互斥锁失败时锁变量的值，由于从bthread竞争互斥锁失败到bthread挂起
+       // 有一定的时间间隔，在这个时间间隔内锁变量的值可能会发生变化，也许锁已经被释放了，那么之前竞争锁失败的bthread
+       // 就不应挂起，否则可能永远不会被唤醒了，它应该放弃挂起动作，再去竞争互斥锁。所以一个bthread在执行挂起动作前
+       // 一定要再次去查看锁变量的当前最新值，只有锁变量当前最新值等于expected_value时才能真正执行挂起动作。
        int expected_value;
        Butex* initial_butex;
+       // 指向全局唯一的TaskControl单例对象的指针。
        TaskControl* control;
    };
    ```
    
+   ```c++
+   // 如果是pthread挂起，则创建ButexPthreadWaiter对象并加入等待队列。
+   struct ButexPthreadWaiter : public ButexWaiter {
+       butil::atomic<int> sig;
+   };
+   ```
    
+   以上面的bthread 1获得了互斥锁、bthread 2和bthread 3因等待互斥锁而被挂起的场景为例，Butex的内存布局如下图所示：
+   
+   <img src="../images/client_bthread_sync_2.png" width="100%" height="100%"/>
 
 2. 执行bthread挂起的函数是butex_wait：
 
