@@ -53,7 +53,7 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
    
     - 由于bthread 1、2、3还未开始运行，未分配任何局部变量，所以此时各自的私有栈都是空的。
 
-<img src="../images/client_send_req_1.png" width="70%" height="70%"/>
+    <img src="../images/client_send_req_1.png" width="70%" height="70%"/>
 
 7. TaskGroup 1、2、3分别对应的3个pthread开始执行各自拿到的bthread的任务函数，即client.cpp中的static类型的sender函数。由于各个bthread有各自的私有栈空间，所以sender中的局部变量request、response、Controller对象均被分配在bthread的私有栈内存上。
 
@@ -83,8 +83,6 @@ Controller实例存储一次完整的RPC请求的Context以及各种状态，主
 
 12. 此时Client进程内部的内存布局如下图所示：
 
-   - 
-
-<img src="../images/client_send_req_2.png" width="100%" height="100%"/>
+    <img src="../images/client_send_req_2.png" width="100%" height="100%"/>
 
 13. 3个请求都发出后，假设服务器正常返回了3个响应，
