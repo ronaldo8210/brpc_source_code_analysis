@@ -1,6 +1,5 @@
 # 目录
-* [brpc使用的线程模型](docs/thread_model.md)
-* M:N线程库
+* brpc的M:N线程模型
   * [bthread基础](docs/bthread_basis.md)
   * [pthread调度执行bthread](docs/bthread_schedule.md)
   * [pthread线程间的Futex同步](docs/futex.md)
@@ -27,4 +26,4 @@
 * 基础库
   * [侵入式双向链表](docs/linkedlist.md)
   * FlatMap哈希表
-  * 定时器
+  * 多线程框架下的定时器
