@@ -9,11 +9,164 @@
 
 1. 在同一个pthread上执行的多个bthread是串行执行的，不需要考虑互斥；
 
-2. 如果位于heap内存上或static静态区上的一个对象A可能会被在不同pthread执行的多个bthread同时访问，则为对象A维护一个锁（一般是一个原子变量）和等待队列，同时访问对象A的多个bthread首先要竞争锁（一般是一个原子变量），假设三个bthread 1、2、3分别在pthread 1、2、3上执行，bthread 1、bthread 2、bthread 3同时访问heap内存上的一个对象A，这时就产生了竞态，假设bthread 1获取到锁，可以去访问对象A，bthread 2、bthread 3先将自身必要的信息（bthread id等）存入等待队列，然后自动yiled，让出cpu，让pthread 2、pthread 3继续去执行各自私有TaskGroup的任务队列中的下一个bthread，这就实现了bthread 2、bthread 3的挂起；
+2. 如果位于heap内存上或static静态区上的一个对象A可能会被在不同pthread执行的多个bthread同时访问，则为对象A维护一个互斥锁（一般是一个原子变量）和等待队列，同时访问对象A的多个bthread首先要竞争锁，假设三个bthread 1、2、3分别在pthread 1、2、3上执行，bthread 1、bthread 2、bthread 3同时访问heap内存上的一个对象A，这时就产生了竞态，假设bthread 1获取到锁，可以去访问对象A，bthread 2、bthread 3先将自身必要的信息（bthread的tid等）存入等待队列，然后自动yiled，让出cpu，让pthread 2、pthread 3继续去执行各自私有TaskGroup的任务队列中的下一个bthread，这就实现了bthread粒度的挂起；
 
-3. 
+3. bthread 1访问完对象A后，通过查询对象A的互斥锁的等待队列，能够得知bthread 2、bthread 3因等待锁而被挂起，bthread 1负责将bthread 2、3的tid重新压入某个pthread（不一定是之前执行执行bthread 2、3的pthread 2、3）的TaskGroup的任务队列，bthread 2、3就能够再次被pthread执行，这就实现了bthread粒度的唤醒。
 
 下面分析下brpc是如何实现bthread粒度的挂起与唤醒的。
 
 ## brpc中Butex的源码解释
-brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中，
+brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
+
+1. 
+
+2. 执行bthread挂起的函数是butex_wait：
+
+   ```c++
+    int butex_wait(void* arg, int expected_value, const timespec* abstime) {
+        Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+        if (b->value.load(butil::memory_order_relaxed) != expected_value) {
+            errno = EWOULDBLOCK;
+            // Sometimes we may take actions immediately after unmatched butex,
+            // this fence makes sure that we see changes before changing butex.
+            butil::atomic_thread_fence(butil::memory_order_acquire);
+            return -1;
+        }
+        TaskGroup* g = tls_task_group;
+        if (NULL == g || g->is_current_pthread_task()) {
+            return butex_wait_from_pthread(g, b, expected_value, abstime);
+        }
+        ButexBthreadWaiter bbw;
+        // tid is 0 iff the thread is non-bthread
+        bbw.tid = g->current_tid();
+        bbw.container.store(NULL, butil::memory_order_relaxed);
+        bbw.task_meta = g->current_task();
+        bbw.sleep_id = 0;
+        bbw.waiter_state = WAITER_STATE_READY;
+        bbw.expected_value = expected_value;
+        bbw.initial_butex = b;
+        bbw.control = g->control();
+
+        if (abstime != NULL) {
+            // Schedule timer before queueing. If the timer is triggered before
+            // queueing, cancel queueing. This is a kind of optimistic locking.
+            if (butil::timespec_to_microseconds(*abstime) <
+                (butil::gettimeofday_us() + MIN_SLEEP_US)) {
+                // Already timed out.
+                errno = ETIMEDOUT;
+                return -1;
+            }
+            bbw.sleep_id = get_global_timer_thread()->schedule(
+                erase_from_butex_and_wakeup, &bbw, *abstime);
+            if (!bbw.sleep_id) {  // TimerThread stopped.
+                errno = ESTOP;
+                return -1;
+            }
+        }
+    #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
+        bvar::Adder<int64_t>& num_waiters = butex_waiter_count();
+        num_waiters << 1;
+    #endif
+
+        // release fence matches with acquire fence in interrupt_and_consume_waiters
+        // in task_group.cpp to guarantee visibility of `interrupted'.
+        bbw.task_meta->current_waiter.store(&bbw, butil::memory_order_release);
+        g->set_remained(wait_for_butex, &bbw);
+        TaskGroup::sched(&g);
+
+        // erase_from_butex_and_wakeup (called by TimerThread) is possibly still
+        // running and using bbw. The chance is small, just spin until it's done.
+        BT_LOOP_WHEN(unsleep_if_necessary(&bbw, get_global_timer_thread()) < 0,
+                     30/*nops before sched_yield*/);
+
+        // If current_waiter is NULL, TaskGroup::interrupt() is running and using bbw.
+        // Spin until current_waiter != NULL.
+        BT_LOOP_WHEN(bbw.task_meta->current_waiter.exchange(
+                         NULL, butil::memory_order_acquire) == NULL,
+                     30/*nops before sched_yield*/);
+    #ifdef SHOW_BTHREAD_BUTEX_WAITER_COUNT_IN_VARS
+        num_waiters << -1;
+    #endif
+
+        bool is_interrupted = false;
+        if (bbw.task_meta->interrupted) {
+            // Race with set and may consume multiple interruptions, which are OK.
+            bbw.task_meta->interrupted = false;
+            is_interrupted = true;
+        }
+        // If timed out as well as value unmatched, return ETIMEDOUT.
+        if (WAITER_STATE_TIMEDOUT == bbw.waiter_state) {
+            errno = ETIMEDOUT;
+            return -1;
+        } else if (WAITER_STATE_UNMATCHEDVALUE == bbw.waiter_state) {
+            errno = EWOULDBLOCK;
+            return -1;
+        } else if (is_interrupted) {
+            errno = EINTR;
+            return -1;
+        }
+        return 0;
+    }
+   ```
+
+3. 执行bthread唤醒的函数有butex_wake（唤醒正在等待一个互斥锁的一个bthread）、butex_wake_all（唤醒正在等待一个互斥锁的所有bthread）、butex_wake_except（唤醒正在等待一个互斥锁的除了指定bthread外的其他bthread），下面解释butex_wake的源码：
+
+   ```c++
+    int butex_wake_all(void* arg) {
+        Butex* b = container_of(static_cast<butil::atomic<int>*>(arg), Butex, value);
+
+        ButexWaiterList bthread_waiters;
+        ButexWaiterList pthread_waiters;
+        {
+            BAIDU_SCOPED_LOCK(b->waiter_lock);
+            while (!b->waiters.empty()) {
+                ButexWaiter* bw = b->waiters.head()->value();
+                bw->RemoveFromList();
+                bw->container.store(NULL, butil::memory_order_relaxed);
+                if (bw->tid) {
+                    bthread_waiters.Append(bw);
+                } else {
+                    pthread_waiters.Append(bw);
+                }
+            }
+        }
+
+        int nwakeup = 0;
+        while (!pthread_waiters.empty()) {
+            ButexPthreadWaiter* bw = static_cast<ButexPthreadWaiter*>(
+                pthread_waiters.head()->value());
+            bw->RemoveFromList();
+            wakeup_pthread(bw);
+            ++nwakeup;
+        }
+        if (bthread_waiters.empty()) {
+            return nwakeup;
+        }
+        // We will exchange with first waiter in the end.
+        ButexBthreadWaiter* next = static_cast<ButexBthreadWaiter*>(
+            bthread_waiters.head()->value());
+        next->RemoveFromList();
+        unsleep_if_necessary(next, get_global_timer_thread());
+        ++nwakeup;
+        TaskGroup* g = get_task_group(next->control);
+        const int saved_nwakeup = nwakeup;
+        while (!bthread_waiters.empty()) {
+            // pop reversely
+            ButexBthreadWaiter* w = static_cast<ButexBthreadWaiter*>(
+                bthread_waiters.tail()->value());
+            w->RemoveFromList();
+            unsleep_if_necessary(w, get_global_timer_thread());
+            g->ready_to_run_general(w->tid, true);
+            ++nwakeup;
+        }
+        if (saved_nwakeup != nwakeup) {
+            g->flush_nosignal_tasks_general();
+        }
+        if (g == tls_task_group) {
+            TaskGroup::exchange(&g, next->tid);
+        } else {
+            g->ready_to_run_remote(next->tid);
+        }
+        return nwakeup;
+    }
+   ```
