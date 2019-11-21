@@ -95,14 +95,20 @@
        g->_last_run_ns = now;
        cur_meta->stat.cputime_ns += elp_ns;
        if (cur_meta->tid != g->main_tid()) {
+           // 如果一个bthread在执行过程中生成了新的bthread，会走到这里。
            g->_cumulated_cputime_ns += elp_ns;
        }
+       // 递增当前bthread的切换次数。
        ++cur_meta->stat.nswitch;
+       // 递增worker线程pthread上的bthread切换次数。
        ++ g->_nswitch;
        // Switch to the task
        if (__builtin_expect(next_meta != cur_meta, 1)) {
+           // 将_cur_meta指向下一个将要执行的bthread的TaskMeta对象的指针。
            g->_cur_meta = next_meta;
            // Switch tls_bls
+           // tls_bls存储的是当前bthread的一些运行期数据（统计量等），执行切换动作前，将tls_bls的内容复制到
+           // 当前bthread的私有storage空间中，再将tls_bls重新指向将要执行的bthread的私有storage。
            cur_meta->local_storage = tls_bls;
            tls_bls = next_meta->local_storage;
 
@@ -116,6 +122,9 @@
 
            if (cur_meta->stack != NULL) {
                if (next_meta->stack != cur_meta->stack) {
+                   // 这里真正执行bthread的切换。
+                   // 将执行pthread的cpu的寄存器的当前状态存入cur_meta的context中，并将next_meta的context中
+                   // 的数据加载到cpu的寄存器中，开始执行next_meta的任务函数。
                    jump_stack(cur_meta->stack, next_meta->stack);
                    // 这里是cur_meta代表的bthread的恢复执行点。
                    // bthread恢复执行的时候可能被steal到其他pthread上了，需要重置TaskGroup对象的指针g。
@@ -153,7 +162,7 @@
    }
    ```
    
-4.    
+4. 一个bthread被执行时，任务函数的入口是   
    
    
    
