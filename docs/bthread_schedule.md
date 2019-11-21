@@ -162,7 +162,23 @@
    }
    ```
    
-4. 一个bthread被执行时，任务函数的入口是   
+4. 一个bthread被执行时，pthread将执行TaskGroup::task_runner()，在这个函数中会去执行TaskMeta对象的fn()，即应用程序设置的bthread任务函数。task_runner()的关键代码如下：
+
+   ```c++
+   void TaskGroup::task_runner() {
+     TaskMeta* const m = g->_cur_meta;
+     // 执行应用程序设置的任务函数，在任务函数中可能yield让出cpu，也可能产生新的bthread。
+     m->fn(m->arg);
+     // 任务函数执行完成后，需要唤起等待该任务函数执行结束的pthread/bthread。
+     butex_wake_except(m->version_butex, 0);
+     // 将pthread线程执行流转入下一个可执行的bthread（普通bthread或pthread的调度bthread）。
+     ending_sched(&g);
+   }
+   ```
+   
+   bthread任务函数结束完后会调用ending_sched()，在ending_sched()内会尝试从本地TaskGroup的任务队列中找出下一个bthread，或者从其他pthread的TaskGroup上steal一个bthread，如果没有bthread可用则下一个被执行的就是pthread的“调度bthread”，通过sched_to()将pthread的执行流转入下一个bthread的任务函数。
+   
+5. 
    
    
    
