@@ -1,7 +1,7 @@
 # 目录
 * brpc的M:N线程模型
   * [bthread基础](docs/bthread_basis.md)
-  * [pthread调度执行bthread](docs/bthread_schedule.md)
+  * [多核环境下pthread调度执行bthread的过程](docs/bthread_schedule.md)
   * [pthread线程间的Futex同步](docs/futex.md)
   * [Butex机制：bthread粒度的挂起与唤醒](docs/butex.md)
 * Client端执行流程
