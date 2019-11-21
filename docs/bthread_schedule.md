@@ -30,14 +30,138 @@
 
 按照以上的原则，分析下brpc中的实现过程。
 
+1. TaskControl创建一个pthread worker线程和其私有的TaskGroup对象时，pthread在TaskGroup::run_main_task上开启无限循环：
 
+   ```c++
+   void TaskGroup::run_main_task() {
+       bvar::PassiveStatus<double> cumulated_cputime(
+           get_cumulated_cputime_from_this, this);
+       std::unique_ptr<bvar::PerSecond<bvar::PassiveStatus<double> > > usage_bvar;
+
+       TaskGroup* dummy = this;
+       bthread_t tid;
+       // 等待一个可执行的bthread，可能从_rq中取得其他pthead压入的bthread id，
+       // 也可能从其他pthread worker线程的TaskGroup中steal一个bthread id。
+       while (wait_task(&tid)) {
+           // 拿到一个bthread，执行流进入bthread的任务函数。
+           TaskGroup::sched_to(&dummy, tid);
+           // run_main_task()恢复执行的开始执行点。
+           DCHECK_EQ(this, dummy);
+           DCHECK_EQ(_cur_meta->stack, _main_stack);
+           // 这里有些疑问，尚不确定何种情景下会执行下面这段代码。
+           if (_cur_meta->tid != _main_tid) {
+               TaskGroup::task_runner(1/*skip remained*/);
+           }
+           if (FLAGS_show_per_worker_usage_in_vars && !usage_bvar) {
+               char name[32];
+   #if defined(OS_MACOSX)
+               snprintf(name, sizeof(name), "bthread_worker_usage_%" PRIu64,
+                        pthread_numeric_id());
+   #else
+               snprintf(name, sizeof(name), "bthread_worker_usage_%ld",
+                        (long)syscall(SYS_gettid));
+   #endif
+               usage_bvar.reset(new bvar::PerSecond<bvar::PassiveStatus<double> >
+                                (name, &cumulated_cputime, 1));
+           }
+       }
+       // stop_main_task() was called.
+       // Don't forget to add elapse of last wait_task.
+       current_task()->stat.cputime_ns += butil::cpuwide_time_ns() - _last_run_ns;
+   }
+   ```
+   
+2. wait_task()函数负责等待一个bthread，如果当前没有bthread可执行，则pthread会挂起。
+   
+3. TaskGroup::sched_to(TaskGroup** pg, bthread_t next_tid)的作用是根据将要执行的bthread的tid在O(1)时间内定位到bthread的TaskMeta对象的地址（TaskMeta是分配在ResourcePool中的，关于ResourcePool可以参考[这篇文章](resource_pool.md)），并确保bthread的私有栈空间已创建、context结构已分配，进而调用TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta)：
+     
+   ```c++
+   void TaskGroup::sched_to(TaskGroup** pg, TaskMeta* next_meta) {
+       TaskGroup* g = *pg;
+   #ifndef NDEBUG
+       if ((++g->_sched_recursive_guard) > 1) {
+           LOG(FATAL) << "Recursively(" << g->_sched_recursive_guard - 1
+                      << ") call sched_to(" << g << ")";
+       }
+   #endif
+       // Save errno so that errno is bthread-specific.
+       const int saved_errno = errno;
+       void* saved_unique_user_ptr = tls_unique_user_ptr;
+
+       // 获取当前正在执行的bthread的TaskMeta对象的地址。
+       TaskMeta* const cur_meta = g->_cur_meta;
+       const int64_t now = butil::cpuwide_time_ns();
+       const int64_t elp_ns = now - g->_last_run_ns;
+       g->_last_run_ns = now;
+       cur_meta->stat.cputime_ns += elp_ns;
+       if (cur_meta->tid != g->main_tid()) {
+           g->_cumulated_cputime_ns += elp_ns;
+       }
+       ++cur_meta->stat.nswitch;
+       ++ g->_nswitch;
+       // Switch to the task
+       if (__builtin_expect(next_meta != cur_meta, 1)) {
+           g->_cur_meta = next_meta;
+           // Switch tls_bls
+           cur_meta->local_storage = tls_bls;
+           tls_bls = next_meta->local_storage;
+
+           // Logging must be done after switching the local storage, since the logging lib 
+           // use bthread local storage internally, or will cause memory leak.
+           if ((cur_meta->attr.flags & BTHREAD_LOG_CONTEXT_SWITCH) ||
+               (next_meta->attr.flags & BTHREAD_LOG_CONTEXT_SWITCH)) {
+               LOG(INFO) << "Switch bthread: " << cur_meta->tid << " -> "
+                         << next_meta->tid;
+           }
+
+           if (cur_meta->stack != NULL) {
+               if (next_meta->stack != cur_meta->stack) {
+                   jump_stack(cur_meta->stack, next_meta->stack);
+                   // 这里是cur_meta代表的bthread的恢复执行点。
+                   // bthread恢复执行的时候可能被steal到其他pthread上了，需要重置TaskGroup对象的指针g。
+                   // probably went to another group, need to assign g again.
+                   g = tls_task_group;
+               }
+   #ifndef NDEBUG
+               else {
+                   // else pthread_task is switching to another pthread_task, sc
+                   // can only equal when they're both _main_stack
+                   CHECK(cur_meta->stack == g->_main_stack);
+               }
+   #endif
+           }
+           // else because of ending_sched(including pthread_task->pthread_task)
+       } else {
+           LOG(FATAL) << "bthread=" << g->current_tid() << " sched_to itself!";
+       }
+
+       while (g->_last_context_remained) {
+           RemainedFn fn = g->_last_context_remained;
+           g->_last_context_remained = NULL;
+           fn(g->_last_context_remained_arg);
+           g = tls_task_group;
+       }
+
+       // Restore errno
+       errno = saved_errno;
+       tls_unique_user_ptr = saved_unique_user_ptr;
+
+   #ifndef NDEBUG
+       --g->_sched_recursive_guard;
+   #endif
+       *pg = g;
+   }
+   ```
+   
+4.    
+   
+   
+   
+   
 
 ## 多核环境下M个bthead在N个pthread上调度执行的具体过程
 
 
 调度顺序：调度过程 bthread A 调度过程 bthread B
 
-1. bthread可能直接执行完
-2. bthread可能yield让出cpu
-3. bthread可能新建bthread
 
