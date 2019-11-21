@@ -178,15 +178,14 @@
    
    bthread任务函数结束完后会调用ending_sched()，在ending_sched()内会尝试从本地TaskGroup的任务队列中找出下一个bthread，或者从其他pthread的TaskGroup上steal一个bthread，如果没有bthread可用则下一个被执行的就是pthread的“调度bthread”，通过sched_to()将pthread的执行流转入下一个bthread的任务函数。
    
-5. 
+5. 一个bthread在自己的任务函数执行过程中想要挂起时，调用TaskGroup::yield(TaskGroup** pg)，yield()内部会调用TaskGroup::sched(TaskGroup** pg)，sched()也是负责将pthread的执行流转入下一个bthread（普通bthread或调度bthread）的任务函数。挂起的bthread在适当的时候会被其他bthread唤醒，即某个bthread会负责将挂起的bthread的tid重新加入TaskGroup的任务队列。
    
-   
+6.    
    
    
 
 ## 多核环境下M个bthead在N个pthread上调度执行的具体过程
 
 
-调度顺序：调度过程 bthread A 调度过程 bthread B
 
 
