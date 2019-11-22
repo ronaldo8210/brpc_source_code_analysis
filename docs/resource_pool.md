@@ -4,8 +4,6 @@
 
 [ResourcePool的源码解析](#ResourcePool的源码解析)
 
-[多线程下内存分配与回收的具体示例](#多线程下内存分配与回收的具体示例)
-
 ## 多线程下内存分配与回收的设计原则
 多线程高度竞争环境下的内存分配，需要考虑两个主要问题：
 
@@ -47,7 +45,7 @@
    
 一个ResourcePool对象的内存布局如下图表示：
 
-<img src="../images/.png" width="100%" height="100%"/>
+TODO
 
 ## ResourcePool的源码解析
 为对象分配内存和回收内存的主要代码都在ResourcePool类中。
@@ -257,20 +255,3 @@
    }
    ```
    
-
-柔性数组
-分配pool时需要按cacheline对齐  考虑局部性原理
-
-
-
-ResourcePoolBlockItemNum  BLOCK_NITEM   一个block里面容纳Item的数量
-FREE_CHUNK_NITEM=BLOCK_NITEM
-
-一个Block  64KB
-
-RP_GROUP_NBLOCK  一个BlockGroup中的Block*的数量
-
-fetch_add  返回原子对象的旧值
-
-_cur_block_index  block在全局中的索引号
-
