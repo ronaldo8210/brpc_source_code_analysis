@@ -32,7 +32,7 @@
      
      unlockable_ver表示RPC即将完成，不允许再有bthread去访问Controller对象了。
      
-     end_ver表示一次RPC结束后，Id对象被回收到对象池中后*butex和*join_butex的值（butex和join_butex都指向Butex对象的第一个元素value，value是个整型值，所以butex和join_butex可转化为指向整型的指针）。end_ver也是被回收的Id对象再次被分配给某一次RPC过程时的first_ver值。
+     end_ver表示一次RPC结束后，Id对象被回收到对象池中后*butex 和 *join_butex的值（butex和join_butex都指向Butex对象的第一个元素value，value是个整型值，所以butex和join_butex可转化为指向整型的指针）。end_ver也是被回收的Id对象再次被分配给某一次RPC过程时的first_ver值。
      
      locked_ver的取值和一次RPC的重试次数有关，locked_ver = first_ver + 重试次数 + 2，例如，如果一次RPC过程开始时分配给本次RPC的Id对象的first_ver=1，本次RPC最多允许重试3次，则locked_ver=6，本次RPC的唯一id _correlation_id=1，第一次请求的call_id=2，第一次重试的call_id=3，第二次重试的call_id=4，第三次重试的call_id=5，contended_ver=7，unlockable_ver=8，end_ver=9（_correlation_id和call_id的值只是举例，实际上_correlation_id和call_id都是64bit整型值，前32bit为Id对象在对象池中的slot位移，后32bit为上述的1、2、3...等版本号。服务器返回的Response会回传call_id，通过call_id的前32bit可以在O(1)时间内定位到本次RPC对应的Id对象，方便进行后续的bthread互斥等操作）。
 
