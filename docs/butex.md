@@ -61,7 +61,7 @@ brpc实现bthread互斥的主要代码在src/bthread/butex.cpp中：
        // 执行bthread的TaskMeta结构的指针。
        TaskMeta* task_meta;
        TimerThread::TaskId sleep_id;
-       // 
+       // 状态标记，根据锁变量当前状态是否发生改变，waiter_state会被设为不同的值。
        WaiterState waiter_state;
        // expected_value存储的是当bthread竞争互斥锁失败时锁变量的值，由于从bthread竞争互斥锁失败到bthread挂起
        // 有一定的时间间隔，在这个时间间隔内锁变量的值可能会发生变化，也许锁已经被释放了，那么之前竞争锁失败的bthread
