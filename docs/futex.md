@@ -35,14 +35,14 @@ Futex机制可以认为是结合了spinlock和内核态的pthread线程锁，它
 
 2. 一个线程在释放锁的时候，也是用原子操作将锁变量的值改回0，并且如果与锁相关的等待队列不为空，则释放锁的线程必须使用内核提供的系统调用去唤醒因等待锁而被挂起的线程，具体是唤醒一个线程还是唤醒全部线程视使用场景而定；
 
-3. 由上可见，使用Futex机制，在没有线程竞争的情况下，在用户层就可以完成临界区代码的加锁解锁，只有在确实有线程竞争的情况下才会使用内核提供的系统调用实现线程的挂起与唤醒。
+3. 由上可见，使用Futex机制，在没有线程竞争的情况下，在用户层就可以完成临界区代码的加锁解锁，只有在确实有线程竞争的情况下才会使用内核提供的系统调用实现线程的挂起与唤醒；
 
 4. 在实现Futex的时候有一个细节需要注意，Futex的代码如果像下面这样写：
 
    ```c++
    void lock() {
      while (!trylock()) {
-       wait();  // 使用内核提供的系统调用挂起当前线程
+       wait();  // 使用内核提供的系统调用挂起当前线程。
      }
    }
    ```
@@ -70,7 +70,7 @@ public:
 public:
     pthread_mutex_t lock;
     pthread_cond_t cond;
-    // 有多少个线程在等待一个锁的时候被挂起
+    // 有多少个线程在等待一个锁的时候被挂起。
     int32_t counts;
     int32_t ref;
 };
@@ -95,7 +95,7 @@ int futex_wait_private(void* addr1, int expected, const timespec* timeout) {
     int rc = 0;
     {
         std::unique_lock<pthread_mutex_t> mu1(simu_futex.lock);
-        // 判断锁*addr1的当前最新值是否等于expected期望值
+        // 判断锁*addr1的当前最新值是否等于expected期望值。
         if (static_cast<butil::atomic<int>*>(addr1)->load() == expected) {
             // 锁*addr1的当前最新值与expected期望值相等，可以使用系统调用将当前线程挂起。
             // 因为有一个线程为了等待锁而将要被挂起，锁*addr1相关的counts计数器需要递增1。
