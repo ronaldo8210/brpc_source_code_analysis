@@ -136,7 +136,7 @@ int bthread_id_lock_and_reset_range_verbose(
             *butex = meta->contended_ver();
             // 记住竞争锁失败时的锁变量的当前值，在bthread真正执行挂起动作前，要再次检查锁变量的最新值，只有挂起前的
             // 锁变量最新值与expected_ver相等，bthread才能真正挂起；如果不等，锁可能已被释放，bthread不能挂起，否则
-            // 可能永远无法被唤醒，这时bthread应该放弃挂起动作，再次去竞争锁。
+            // 可能永远无法被唤醒，这时bthread应该放弃挂起动作，再次去竞争butex锁。
             uint32_t expected_ver = *butex;
             // 关键字段的重置已完成，可以释放pthread线程锁了。
             meta->mutex.unlock();
@@ -167,10 +167,11 @@ int bthread_id_lock_and_reset_range_verbose(
 }
 ```
 
-- bthread_id_unlock：释放butex锁，唤醒一个等待锁的bthread
+- bthread_id_unlock：释放butex锁，从锁的等待队列中唤醒一个bthread：
 
 ```c++
 int bthread_id_unlock(bthread_id_t id) {
+    // 通过id的前32bits，在O(1)时间内定位到Id对象的地址。
     bthread::Id* const meta = address_resource(bthread::get_slot(id));
     if (!meta) {
         return EINVAL;
@@ -179,17 +180,17 @@ int bthread_id_unlock(bthread_id_t id) {
     // Release fence makes sure all changes made before signal visible to
     // woken-up waiters.
     const uint32_t id_ver = bthread::get_version(id);
-    // 竞争线程锁
+    // 竞争pthread线程锁。
     meta->mutex.lock();
     if (!meta->has_version(id_ver)) {
-        // call_id非法，严重错误
+        // call_id非法，严重错误。
         meta->mutex.unlock();
         LOG(FATAL) << "Invalid bthread_id=" << id.value;
         return EINVAL;
     }
     if (*butex == meta->first_ver) {
-        // 一个bthread执行到这里，观察到的Butex的value的值要么是locked_ver，要么是contented_ver，
-        // 不可能是first_ver，否则严重错误
+        // 一个bthread执行到这里，观察到的butex锁变量的当前值要么是locked_ver，要么是contented_ver，
+        // 不可能是first_ver，否则严重错误。
         meta->mutex.unlock();
         LOG(FATAL) << "bthread_id=" << id.value << " is not locked!";
         return EPERM;
@@ -206,15 +207,16 @@ int bthread_id_unlock(bthread_id_t id) {
                                    front.error_text);
         }
     } else {
-        // 如果contended为true，则有N（N>=1）个bthread挂在Butex的waiters队列中，等待唤醒
+        // 如果锁变量的当前值为contended_ver，则有N（N>=1）个bthread挂在锁的waiters队列中，等待唤醒。
         const bool contended = (*butex == meta->contended_ver());
-        // Butex的value恢复到first_ver，表示当前的bthread对Controller的独占性访问已完成，后续被唤醒的bthread可以去独占性的访问Controller了
+        // 重置锁变量的值为first_ver，表示当前的bthread对Controller的独占性访问已完成，后续被唤醒的bthread可以去
+        // 竞争对Controller的访问权了。
         *butex = meta->first_ver;
-        // 关键字段已完成更新，释放线程锁
+        // 关键字段已完成更新，释放线程锁。
         meta->mutex.unlock();
         if (contended) {
             // We may wake up already-reused id, but that's OK.
-            // 如果有bthread挂在waiters队列中，唤醒其中之一
+            // 唤醒waiters等待队列中的一个bthread。
             bthread::butex_wake(butex);
         }
         return 0; 
@@ -222,10 +224,11 @@ int bthread_id_unlock(bthread_id_t id) {
 }
 ```
 
-- bthread_id_join：
+- bthread_id_join：负责RPC发送过程的bthread完成发送动作后，会调用bthread_id_join将自身挂起，等待处理服务器Response的bthread来唤醒。这时是挂在join_butex锁的等待队列中的，与butex锁无关。
 
 ```c++
 int bthread_id_join(bthread_id_t id) {
+    // 通过id的前32bits，在O(1)时间内定位到Id对象的地址。
     const bthread::IdResourceId slot = bthread::get_slot(id);
     bthread::Id* const meta = address_resource(slot);
     if (!meta) {
@@ -242,81 +245,13 @@ int bthread_id_join(bthread_id_t id) {
         if (!has_ver) {
             break;
         }
-        // 挂在join_butex指向的Butex结构的waiter队列中，并yield让出cpu；
-        // 恢复执行的时候，RPC过程已经完成，
+        // 将ButexWaiter挂在join_butex锁的等待队列中，bthread yield让出cpu。
+        // bthread恢复执行的时候，一般是RPC过程已经完成时。
         if (bthread::butex_wait(join_butex, expected_ver, NULL) < 0 &&
             errno != EWOULDBLOCK && errno != EINTR) {
             return errno;
         }
     }
-    return 0;
-}
-```
-
-- bthread_id_about_to_destroy：
-
-```c++
-int bthread_id_about_to_destroy(bthread_id_t id) {
-    bthread::Id* const meta = address_resource(bthread::get_slot(id));
-    if (!meta) {
-        return EINVAL;
-    }
-    const uint32_t id_ver = bthread::get_version(id);
-    uint32_t* butex = meta->butex;
-    meta->mutex.lock();
-    if (!meta->has_version(id_ver)) {
-        meta->mutex.unlock();
-        return EINVAL;
-    }
-    if (*butex == meta->first_ver) {
-        meta->mutex.unlock();
-        LOG(FATAL) << "bthread_id=" << id.value << " is not locked!";
-        return EPERM;
-    }
-    const bool contended = (*butex == meta->contended_ver());
-    *butex = meta->unlockable_ver();
-    meta->mutex.unlock();
-    if (contended) {
-        // wake up all waiting lockers.
-        bthread::butex_wake_except(butex, 0);
-    }
-    return 0;
-}
-```
-
-- bthread_id_unlock_and_destroy：
-
-```c++
-int bthread_id_unlock_and_destroy(bthread_id_t id) {
-    bthread::Id* const meta = address_resource(bthread::get_slot(id));
-    if (!meta) {
-        return EINVAL;
-    }
-    uint32_t* butex = meta->butex;
-    uint32_t* join_butex = meta->join_butex;
-    const uint32_t id_ver = bthread::get_version(id);
-    meta->mutex.lock();
-    if (!meta->has_version(id_ver)) {
-        meta->mutex.unlock();
-        LOG(FATAL) << "Invalid bthread_id=" << id.value;
-        return EINVAL;
-    }
-    if (*butex == meta->first_ver) {
-        meta->mutex.unlock();
-        LOG(FATAL) << "bthread_id=" << id.value << " is not locked!";
-        return EPERM;
-    }
-    const uint32_t next_ver = meta->end_ver();
-    *butex = next_ver;
-    *join_butex = next_ver;
-    meta->first_ver = next_ver;
-    meta->locked_ver = next_ver;
-    meta->pending_q.clear();
-    meta->mutex.unlock();
-    // Notice that butex_wake* returns # of woken-up, not successful or not.
-    bthread::butex_wake_except(butex, 0);
-    bthread::butex_wake_all(join_butex);
-    return_resource(bthread::get_slot(id));
     return 0;
 }
 ```
