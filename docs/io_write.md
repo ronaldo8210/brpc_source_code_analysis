@@ -4,7 +4,6 @@
 
 [一个实际场景下的示例](#一个实际场景下的示例) 
 
-
 ## 多线程向同一个TCP连接写数据的设计原理
 考虑brpc自带的示例程序example/multi_threaded_echo_c++/client.cpp，use_bthread为true的情况下，多个bthread通过一条TCP长连接向服务端发送数据，而多个bthread通常又是运行在多个系统线程pthread上的，所以多个pthread如何高效且线程安全地向一个TCP连接写数据，是系统设计需要重点考虑的。brpc针对这个问题的设计思路如下：
 
@@ -16,29 +15,20 @@
 
 4. KeepWrite bthread直到通过一个原子操作判断出_write_hread已为NULL时，才会执行完成，如果同时刻有一个线程通过原子操作判断出_write_hread为NULL，则重复上述过程1，所以不可能同时有两个KeepWrite bthread存在。
 
-5. 按照如上规则，所有bthread都不会有任何的等待操作，这就做到了wait-free，当然也是lock-free的（判断自己是不是第一个向fd写数据的线程的操作实际上是个原子交换操作）
+5. 按照如上规则，所有bthread都不会有任何的等待操作，这就做到了wait-free，当然也是lock-free的（判断自己是不是第一个向fd写数据的线程的操作实际上是个原子交换操作）。
 
 下面结合brpc的源码来阐述这套逻辑的实现。
 
-
 ## brpc中的代码实现
-brpc中的Socket类对象代表Client端与Server端的一条TCP连接，
+brpc中的Socket类对象代表Client端与Server端的一条TCP连接，其中主要函数有：
 
-Socket类对象中比较重要的成员变量：
-
-_epollout_butex：
-
-_write_head：
-
-Socket类的主要函数：
-
-StartWrite函数：每个bthread向TCP连接写数据的入口，在实际环境下通常会被多个pthread执行，必须要做到线程安全
+- StartWrite函数：每个bthread向TCP连接写数据的入口，在实际环境下通常会被多个pthread执行，必须要做到线程安全：
 
 ```c++
 int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
     // Release fence makes sure the thread getting request sees *req
     // 与当前_write_head做原子交换，_write_head初始值是NULL，
-    // 如果是第一个写fd的线程，则exchange返回NULL，并将_write_head指向第一个线程的待写数据,
+    // 如果是第一个写fd的线程，则exchange返回NULL，并将_write_head指向第一个线程的待写数据，
     // 如果不是第一个写fd的线程，exchange返回值是非NULL，且将_write_head指向最新到来的待写数据。
     WriteRequest* const prev_head =
         _write_head.exchange(req, butil::memory_order_release);
@@ -111,7 +101,8 @@ int Socket::StartWrite(WriteRequest* req, const WriteOptions& opt) {
         AddOutputBytes(nw);
     }
     // 判断req指向的数据是否已写完。
-    // 在IsWriteComplete内部会判断，如果req指向的数据已全部写完，且当前时刻req是唯一待写入的数据，则IsWriteComplete返回true。
+    // 在IsWriteComplete内部会判断，如果req指向的数据已全部写完，且当前时刻req是唯一待写入的数据，
+    // 则IsWriteComplete返回true。
     if (IsWriteComplete(req, true, NULL)) {
         // 回收req指向的heap内存到对象池，bthread完成任务，返回。
         ReturnSuccessfulWriteRequest(req);
@@ -123,7 +114,8 @@ KEEPWRITE_IN_BACKGROUND:
     req->socket = ptr_for_keep_write.release();
     // req指向的数据未全部写完，为了使pthread wait-free，启动KeepWrite bthread后，当前bthread就返回。
     // 在KeepWrite bthread内部，不仅需要处理当前req未写完的数据，还可能要处理其他bthread加入链表的数据。
-    // KeepWrite bthread并不具有最高的优先级，所以使用bthread_start_background，将KeepWrite bthread id加到执行队列尾部
+    // KeepWrite bthread并不具有最高的优先级，所以使用bthread_start_background，将KeepWrite bthread的
+    // tid加到执行队列尾部。
     if (bthread_start_background(&th, &BTHREAD_ATTR_NORMAL,
                                  KeepWrite, req) != 0) {
         LOG(FATAL) << "Fail to start KeepWrite";
@@ -141,7 +133,7 @@ FAIL_TO_WRITE:
 }
 ```
 
-KeepWrite函数：作为一个独立存在的bthread的任务函数，负责不停地写入所有线程加入到_write_hread链表的数据，直到链表为空
+- KeepWrite函数：作为一个独立存在的bthread的任务函数，负责不停地写入所有线程加入到_write_hread链表的数据，直到链表为空：
 
 ```c++
 void* Socket::KeepWrite(void* void_arg) {
@@ -155,10 +147,13 @@ void* Socket::KeepWrite(void* void_arg) {
     WriteRequest* cur_tail = NULL;
     do {
         // req was written, skip it.
-        // 如果req的next指针不为NULL，则已经调用过IsWriteComplete实现了单向链表的翻转，待写数据的顺序已按到达序排列，
-        // 所以如果req的next指针不为NULL且req的数据已写完，可以即刻回收req指向的内存，并将req重新赋值为下一个待写数据的指针。
+        // 如果req的next指针不为NULL，则已经调用过IsWriteComplete实现了单向链表的翻转，
+        // 待写数据的顺序已按到达序排列。
+        // 所以如果req的next指针不为NULL且req的数据已写完，可以即刻回收req指向的内存，
+        // 并将req重新赋值为下一个待写数据的指针。
         if (req->next != NULL && req->data.empty()) {
-            // 执行到这里，就是因为虽然req指向的WriteRequest中的数据已写完，但_write_head链表中又被其他bthread加入了待写数据
+            // 执行到这里，就是因为虽然req指向的WriteRequest中的数据已写完，
+            // 但_write_head链表中又被其他bthread加入了待写数据。
             WriteRequest* const saved_req = req;
             req = req->next;
             s->ReturnSuccessfulWriteRequest(saved_req);
@@ -193,9 +188,9 @@ void* Socket::KeepWrite(void* void_arg) {
         //if (nw <= 0 || req->data.empty()/*note*/) {
         if (nw <= 0) {
             // 执行到这里，nw小于0的原因肯定是因为内核inode输出缓存已满。
-            // 如果是由于fd的inode输出缓冲区已满导致write操作返回值小于等于0，则需要挂起执行KeepWrite的bthread，让出cpu，
-            // 让该bthread所在的pthread去任务队列中取出下一个bthread去执行。等到epoll返回告知inode输出缓冲区有可写空间时，
-            // 再唤起执行KeepWrite的bthread，继续向fd写入数据
+            // 如果是由于fd的inode输出缓冲区已满导致write操作返回值小于等于0，则需要挂起执行KeepWrite的
+            // bthread，让出cpu，让该bthread所在的pthread去任务队列中取出下一个bthread去执行。
+            // 等到epoll返回告知inode输出缓冲区有可写空间时，再唤起执行KeepWrite的bthread，继续向fd写入数据。
             g_vars->nwaitepollout << 1;
             bool pollin = (s->_on_edge_triggered_events != NULL);
             // NOTE: Waiting epollout within timeout is a must to force
@@ -204,7 +199,8 @@ void* Socket::KeepWrite(void* void_arg) {
             // growing infinitely.
             const timespec duetime =
                 butil::milliseconds_from_now(WAIT_EPOLLOUT_TIMEOUT_MS);
-            // 在WaitEpollOut内部会执行butex_wait，挂起当前bthread。当bthread重新执行时，执行点是butex_wait的函数返回点。
+            // 在WaitEpollOut内部会执行butex_wait，挂起当前bthread。当bthread重新执行时，执行点是
+            // butex_wait的函数返回点。
             const int rc = s->WaitEpollOut(s->fd(), pollin, &duetime);
             if (rc < 0 && errno != ETIMEDOUT) {
                 const int saved_errno = errno;
@@ -214,7 +210,7 @@ void* Socket::KeepWrite(void* void_arg) {
                 break;
             }
         }
-        // 令cur_tail找到已翻转链表的尾节点
+        // 令cur_tail找到已翻转链表的尾节点。
         if (NULL == cur_tail) {
             for (cur_tail = req; cur_tail->next != NULL;
                  cur_tail = cur_tail->next);
@@ -225,7 +221,8 @@ void* Socket::KeepWrite(void* void_arg) {
         if (s->IsWriteComplete(cur_tail, (req == cur_tail), &cur_tail)) {
             // 如果IsWriteComplete返回true，则req必然，并且当前的_write_hread肯定是NULL
             CHECK_EQ(cur_tail, req);
-            // 回收内存后KeepWrite bthread就结束了，后续再有线程向fd写数据，则重复以前的逻辑。所以同一时刻只会存在一个KeepWrite bthread。
+            // 回收内存后KeepWrite bthread就结束了，后续再有线程向fd写数据，则重复以前的逻辑。
+            // 所以同一时刻只会存在一个KeepWrite bthread。
             s->ReturnSuccessfulWriteRequest(req);
             return NULL;
         }
@@ -237,7 +234,7 @@ void* Socket::KeepWrite(void* void_arg) {
 }
 ```
 
-IsWriteComplete函数：两种情况下会调用IsWriteComplete函数，1、持有写权限的bthread向fd写自身的WriteRequest中的待写数据，写一次fd后检测自身的WriteRequest中的数据是否写完；2、被KeepWrite bthread中执行，检测上一轮经过翻转的单向链表中的各个WriteRequest中数据是否全部写完。并且IsWriteComplete函数内部还负责检测是否还有其他bthread向_write_head链表加入了新的待写数据。
+- IsWriteComplete函数：两种情况下会调用IsWriteComplete函数，1、持有写权限的bthread向fd写自身的WriteRequest中的待写数据，写一次fd后检测自身的WriteRequest中的数据是否写完；2、被KeepWrite bthread中执行，检测上一轮经过翻转的单向链表中的各个WriteRequest中数据是否全部写完。并且IsWriteComplete函数内部还负责检测是否还有其他bthread向_write_head链表加入了新的待写数据。
 
 ```c++
 bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
@@ -257,7 +254,8 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
     }
     // 1、如果之前翻转的链表已全部写完，则将_write_head置为NULL，当前的KeepWrite bthread也即将结束；
     // 2、如果之前翻转的链表未全部写完，且暂时无其他bthread向_write_head新增待写数据，_write_head指针保存原值；
-    // 3、如果之前翻转的链表未全部写完，且已经有其他bthread向_write_head新增待写数据，将new_head的值置为当前最新的_write_head值，为后续的链表翻转做准备
+    // 3、如果之前翻转的链表未全部写完，且已经有其他bthread向_write_head新增待写数据，将new_head的值置为当前
+    //    最新的_write_head值，为后续的链表翻转做准备。
     if (_write_head.compare_exchange_strong(
             new_head, desired, butil::memory_order_acquire)) {
         // No one added new requests.
@@ -274,8 +272,8 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
 
     // Someone added new requests.
     // Reverse the list until old_head.
-    // 将以new_head为头节点、old_head为尾节点的单向链表做一次翻转，保证待写数据以先后顺序排序
-    // 随时可能有新的bthread将待写数据加入到_write_head链表，但暂时不考虑这些新来的数据
+    // 将以new_head为头节点、old_head为尾节点的单向链表做一次翻转，保证待写数据以先后顺序排序。
+    // 随时可能有新的bthread将待写数据加入到_write_head链表，但暂时不考虑这些新来的数据。
     WriteRequest* tail = NULL;
     WriteRequest* p = new_head;
     do {
@@ -305,7 +303,6 @@ bool Socket::IsWriteComplete(Socket::WriteRequest* old_head,
     return false;
 }
 ```
-
 
 ## 一个实际场景下的示例
 下面以一个实际场景为例，说明线程执行过程和内存变化过程：
