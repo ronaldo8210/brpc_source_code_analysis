@@ -96,6 +96,8 @@
 
 3. 服务器被正常关闭
 
+   客户端对一个fd的read操作返回0后，该fd不再可用，关闭fd，客户端应将后续的请求发给连接池中的其他TCP连接。如果fd上有bthread因等待服务器的Response而被挂起，则这些bthread需要被唤醒，唤醒后去执行RPC重试的逻辑。
+
 4. 因服务器机器断电或网络断线导致的TCP连接异常
 
-   当一个TCP连接出现异常后，epoll会在对应的fd上触发EPOLLERR事件，brpc会立即将fd所属的Socket对象置为不可用，如果之前已经有bthread使用此Socket对象发送了数据，这些bthread已被挂起，需要将这些bthread再次唤醒。
+   当一个TCP连接出现异常后，epoll会在对应的fd上触发EPOLLERR事件，brpc会立即将fd所属的Socket对象置为不可用，如果之前已经有bthread通过此Socket对象发送了数据、正在等待服务器Response而被挂起，则这些bthread需要被唤醒，唤醒后去执行RPC重试的逻辑。
