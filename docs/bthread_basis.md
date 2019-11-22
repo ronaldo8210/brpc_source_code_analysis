@@ -156,7 +156,7 @@ pthread执行func_1中的swapcontext(&ctx[1], &ctx[2])后，协程1被挂起，c
 
 在brpc中一个协程任务可以称作一个bthread，一个bthread在内存中表示为一个TaskMeta对象，TaskMeta对象会被分配在ResourcePool中，TaskMeta类的主要的成员变量有：
 
-- fn&arg：应用程序设置的bthread的任务处理函数及其参数；
+- fn & arg：应用程序设置的bthread的任务处理函数及其参数。
 
 - ContextualStack* stack：ContextualStack结构的定义为：
 
