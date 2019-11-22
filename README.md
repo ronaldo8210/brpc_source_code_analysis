@@ -7,14 +7,14 @@
 * Client端执行流程
   * [无异常状态下的一次完整RPC请求过程](docs/client_rpc_normal.md)
   * [RPC请求可能遇到的多种异常及应对策略](docs/client_rpc_exception.md)
-  * [重试&Backup Request](docs/client_retry.md)
+  * 重试&Backup Request
   * [同一RPC过程中各个bthread间的互斥](docs/client_bthread_sync.md)
 * Server端执行流程
   * 处理一次RPC请求的完整过程
   * 服务器自动限流
   * 防雪崩
 * 并发读写TCP连接上的数据
-  * [protobuf编程模式](docs/io_protobuf.md)
+  * protobuf编程模式
   * [多线程向同一TCP连接写入数据](docs/io_write.md)
   * [从TCP连接读取数据的并发处理](docs/io_read.md)
 * 内存管理
