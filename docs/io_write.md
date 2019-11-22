@@ -163,7 +163,8 @@ void* Socket::KeepWrite(void* void_arg) {
         const ssize_t nw = s->DoWrite(req);
         if (nw < 0) {
             if (errno != EAGAIN && errno != EOVERCROWDED) {
-                // 如果不是因为内核inode输出缓存已满导致的write操作结果小于0，则标记Socket对象状态异常（TCP连接异常）。
+                // 如果不是因为内核inode输出缓存已满导致的write操作结果小于0，
+                // 则标记Socket对象状态异常（TCP连接异常）。
                 const int saved_errno = errno;
                 PLOG(WARNING) << "Fail to keep-write into " << *s;
                 s->SetFailed(saved_errno, "Fail to keep-write into %s: %s",
@@ -220,7 +221,7 @@ void* Socket::KeepWrite(void* void_arg) {
         // Return when there's no more WriteRequests and req is completely
         // written.
         if (s->IsWriteComplete(cur_tail, (req == cur_tail), &cur_tail)) {
-            // 如果IsWriteComplete返回true，则req必然，并且当前的_write_hread肯定是NULL
+            // 如果IsWriteComplete返回true，则req必然，并且当前的_write_hread肯定是NULL。
             CHECK_EQ(cur_tail, req);
             // 回收内存后KeepWrite bthread就结束了，后续再有线程向fd写数据，则重复以前的逻辑。
             // 所以同一时刻只会存在一个KeepWrite bthread。
