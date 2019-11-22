@@ -17,7 +17,13 @@
    
    - _cur_meta：当前正在执行的bthread的TaskMeta对象的地址。
    
-2. 
+2. TaskControl对象是全局的单例对象，主要成员有：
+
+   - _pl：ParkingLot类型的数组。
+   
+   - _workers：pthread线程标识符的数组，表示创建了多少个pthread worker线程，每个pthread worker线程应拥有一个线程私有的TaskGroup对象。
+   
+   - _groups：TaskGroup对象指针的数组。
 
 ## 一个pthread调度执行私有TaskGroup的任务队列中各个bthread的过程
 一个pthread调度执行私有TaskGroup任务队列中的各个bthread，这些bthread是在pthread上串行执行的，彼此间不会有竞争。一个bthread的执行过程可能会有三种状态：
@@ -180,9 +186,7 @@
    
 5. 一个bthread在自己的任务函数执行过程中想要挂起时，调用TaskGroup::yield(TaskGroup** pg)，yield()内部会调用TaskGroup::sched(TaskGroup** pg)，sched()也是负责将pthread的执行流转入下一个bthread（普通bthread或调度bthread）的任务函数。挂起的bthread在适当的时候会被其他bthread唤醒，即某个bthread会负责将挂起的bthread的tid重新加入TaskGroup的任务队列。
    
-6.    
-   
-   
+6. 一个bthread 1在自己的任务函数执行过程中需要创建新的bthread 2时，会调用TaskGroup::start_foreground()，在start_foreground()内完成bthread 2的TaskMeta对象的创建，并调用sched_to()让pthread去执行bthread 2的任务函数。pthread在真正执行bthread 2的任务函数前会将bthread 1的tid重新压入TaskGroup的任务队列，bthread 1不久之后会再次被调度执行。
 
 ## 多核环境下M个bthead在N个pthread上调度执行的具体过程
 
