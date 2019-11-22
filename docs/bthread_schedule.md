@@ -2,8 +2,6 @@
 
 [一个pthread调度执行私有TaskGroup的任务队列中各个bthread的过程](#一个pthread调度执行私有TaskGroup的任务队列中各个bthread的过程)
 
-[多核环境下M个bthead在N个pthread上调度执行的具体过程](#多核环境下M个bthead在N个pthread上调度执行的具体过程)
-
 ## 调度执行bthread的主要数据结构
 在一个线上环境系统中，会产生大量的bthread，系统的cpu核数有限，如何让大量的bthread在有限的cpu核心上得到充分调度执行，实现全局的最大并发主要是由TaskGroup对象、TaskControl对象实现的。
 
@@ -24,6 +22,10 @@
    - _workers：pthread线程标识符的数组，表示创建了多少个pthread worker线程，每个pthread worker线程应拥有一个线程私有的TaskGroup对象。
    
    - _groups：TaskGroup对象指针的数组。
+   
+   TaskControl和TaskGroup的内存关系如下图所示：
+   
+   <img src="../images/bthread_schedule_1.png" width="70%" height="70%"/>
 
 ## 一个pthread调度执行私有TaskGroup的任务队列中各个bthread的过程
 一个pthread调度执行私有TaskGroup任务队列中的各个bthread，这些bthread是在pthread上串行执行的，彼此间不会有竞争。一个bthread的执行过程可能会有三种状态：
@@ -187,9 +189,3 @@
 5. 一个bthread在自己的任务函数执行过程中想要挂起时，调用TaskGroup::yield(TaskGroup** pg)，yield()内部会调用TaskGroup::sched(TaskGroup** pg)，sched()也是负责将pthread的执行流转入下一个bthread（普通bthread或调度bthread）的任务函数。挂起的bthread在适当的时候会被其他bthread唤醒，即某个bthread会负责将挂起的bthread的tid重新加入TaskGroup的任务队列。
    
 6. 一个bthread 1在自己的任务函数执行过程中需要创建新的bthread 2时，会调用TaskGroup::start_foreground()，在start_foreground()内完成bthread 2的TaskMeta对象的创建，并调用sched_to()让pthread去执行bthread 2的任务函数。pthread在真正执行bthread 2的任务函数前会将bthread 1的tid重新压入TaskGroup的任务队列，bthread 1不久之后会再次被调度执行。
-
-## 多核环境下M个bthead在N个pthread上调度执行的具体过程
-
-
-
-
