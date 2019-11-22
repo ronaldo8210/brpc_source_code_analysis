@@ -58,7 +58,7 @@
 
 假设现在有bthread 1使用同步方式发起了一次RPC请求，发送请求后bthread 1被挂起，等待有bthread向Controller对象填充请求的Response，或者超时。一段时间后处理服务器Response的bthread 2和处理超时的bthread 3同时执行，bthread 2抢到Controller的访问权，bthread 3被挂起。此时Controller、Id、Butex几种对象间的内存关系如下图所示，注意Controller对象分配在bthread 1的私有栈上，两个ButexBthreadWaiter对象也分配在相应bthread的私有栈上，Id对象和Butex对象都是通过ResourcePool机制分配的，被分配在heap堆上，Butex 2的value值是contended_ver，因为bthread 2访问Controller期间有bthread 3在排队等待，bthread 2释放Controller访问权后必须负责唤醒bthread 3，并且bthread 2成功向Controller写入了服务器的Response，满足bthread 1的唤醒条件，bthread 2还必须负责唤醒bthread 1。
 
-<img src="../images/client_bthread_sync_1.png" width="50%" height="50%"/>
+<img src="../images/client_bthread_sync_1.png" width="65%" height="65%"/>
 
 ## brpc实现bthread互斥的源码解释
 brpc实现bthread互斥的主要结构为Id和Butex，关于Butex的细节请见[这篇文章](butex.md)，Id相关的代码在src/bthread/id.cpp中，主要的一些函数如下：
@@ -125,24 +125,25 @@ int bthread_id_lock_and_reset_range_verbose(
             //    要么是locked_ver，要么是contented_ver：
             //    a、如果锁变量的当前值=locked_ver，表示当前有一个bthread A正在访问Controller且还没有访问完成，
             //       且锁的等待队列中没有其他bthread被挂起；
-            //    b、如果锁变量的当前值=contented_ver，表示当前不仅有一个bthread A正在访问Controller且还没有访问完成，
-            //       而且还有一个或多个bthread（B、D、E...）被挂起，等待唤醒。
-            // 2、执行到这段代码的bthread必须要挂起，挂起前先将锁变量的值置为contended_ver，告诉正在访问Controller的bthread，
-            //    访问完Controller后，要负责唤醒挂起的bthread；
-            // 3、挂起是指：bthread将cpu寄存器的上下文存入context结构，让出cpu，执行这个bthread的pthread从TaskGroup的任务队列中
-            //    取出下一个bthread去执行。
+            //    b、如果锁变量的当前值=contented_ver，表示当前不仅有一个bthread A正在访问Controller且还没有
+            //       访问完成，而且还有一个或多个bthread（B、D、E...）被挂起，等待唤醒。
+            // 2、执行到这段代码的bthread必须要挂起，挂起前先将锁变量的值置为contended_ver，告诉正在访问Controller
+            //    的bthread，访问完Controller后，要负责唤醒挂起的bthread；
+            // 3、挂起是指：bthread将cpu寄存器的上下文存入context结构，让出cpu，执行这个bthread的pthread从TaskGroup
+            //    的任务队列中取出下一个bthread去执行。
                   
             // 将锁变量的值置为contended_ver。  
             *butex = meta->contended_ver();
-            // 记住竞争锁失败时的锁变量的当前值，在bthread真正执行挂起动作前，要再次检查锁变量的最新值，只有挂起前的锁变量最新值
-            // 与expected_ver相等，bthread才能真正挂起；如果不等，锁可能已被释放，bthread不能挂起，否则可能永远
-            // 无法被唤醒，这时bthread应该放弃挂起动作，再次去竞争锁。
+            // 记住竞争锁失败时的锁变量的当前值，在bthread真正执行挂起动作前，要再次检查锁变量的最新值，只有挂起前的
+            // 锁变量最新值与expected_ver相等，bthread才能真正挂起；如果不等，锁可能已被释放，bthread不能挂起，否则
+            // 可能永远无法被唤醒，这时bthread应该放弃挂起动作，再次去竞争锁。
             uint32_t expected_ver = *butex;
             // 关键字段的重置已完成，可以释放pthread线程锁了。
             meta->mutex.unlock();
             // 已经出现了bthread间的竞态。
             ever_contended = true;
-            // 在butex_wait内部，新建ButexWaiter结构保存该bthread的主要信息并将ButexWaiter加入锁的等待队列waiters链表，然后yield让出cpu。
+            // 在butex_wait内部，新建ButexWaiter结构保存该bthread的主要信息并将ButexWaiter加入锁的等待队列waiters
+            // 链表，然后yield让出cpu。
             // bthread真正挂起前，要再次判断锁变量的最新值是否与expected_ver相等。
             if (bthread::butex_wait(butex, expected_ver, NULL) < 0 &&
                 errno != EWOULDBLOCK && errno != EINTR) {
@@ -151,12 +152,12 @@ int bthread_id_lock_and_reset_range_verbose(
             
             // 这里是bthread被唤醒后，恢复执行点。
             
-            // 之前挂起的bthread被重新执行，先要再次去竞争pthread线程锁。不一定能竞争成功，
-            // 所以上层要有一个while循环不断的去判断被唤醒的bthread抢到pthread线程锁后可能观察到的butex锁变量的各种不同值。
+            // 之前挂起的bthread被重新执行，先要再次去竞争pthread线程锁。不一定能竞争成功，所以上层要有一个while循环
+            // 不断的去判断被唤醒的bthread抢到pthread线程锁后可能观察到的butex锁变量的各种不同值。
             meta->mutex.lock();
         } else { // bthread_id_about_to_destroy was called.
-            // Butex的value被其他bthread置为unlockable_ver，Id结构将被释放回资源池，Controller结构将被析构，即一次RPC已经完成，
-            // 因此执行到这里的bthread直接返回，不会再有后续的动作。
+            // Butex的value被其他bthread置为unlockable_ver，Id结构将被释放回资源池，Controller结构将被析构，
+            // 即一次RPC已经完成，因此执行到这里的bthread直接返回，不会再有后续的动作。
             meta->mutex.unlock();
             return EPERM;
         }
