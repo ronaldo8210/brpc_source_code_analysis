@@ -28,3 +28,10 @@ I/O线程从每个fd上读取到数据后，将已读取数据的指针或引用
 3. I/O线程从fd的inode内核缓存读数据到应用层缓冲区，worker线程需要处理这块内存上的数据，内存数据同步到执行worker线程的cpu的cacheline上需要耗费时间。
 
 ## brpc实现的读数据方式
+brpc没有专门的I/O线程，只有worker线程，epoll_wait()也是在bthread中被执行。当一个fd可读时：
+
+1. 读取动作并不是在epoll_wait()所在的bthread 1上执行，而是会通过TaskGroup::start_foreground()新建一个bthread 2，bthread 2负责将fd的inode内核输入缓存中的数据读到应用层缓存区，pthread执行流会立即进入bthread 2，bthread 1会被加入任务队列的尾部，可能会被steal到其他pthread上执行；
+
+2. bthread 2进行拆包时，每解析出一个完整的应用层报文，就会为每个报文的处理再专门创建一个bthread，所以bthread 2可能会创建bthread 3、4、5...这样的设计意图是尽量让一个fd上读出的各个报文也得到最大化的并发处理。
+
+（细节TODO）
